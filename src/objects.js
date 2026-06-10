@@ -1036,6 +1036,7 @@ export function getAttr(obj, name) {
 
   if (obj instanceof PyBuiltin) {
     if (name === '__name__') return obj.name;
+    if (obj.attrs && obj.attrs.has(name)) return obj.attrs.get(name);
     raiseError('AttributeError', `'builtin_function_or_method' object has no attribute '${name}'`);
   }
 
