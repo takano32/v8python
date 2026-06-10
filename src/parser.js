@@ -452,7 +452,10 @@ class Parser {
 
   parseParams(endTok) {
     // Returns {posOnly:[], pos:[{name, default}], varArg, kwOnly:[{name, default}], kwArg}
+    // In a lambda (endTok === ':'), parameter annotations are not allowed: a ':'
+    // there is the lambda body separator, not an annotation.
     const params = { posOnly: [], pos: [], varArg: null, kwOnly: [], kwArg: null };
+    const allowAnnotations = endTok !== ':';
     let seenDefault = false;
     let afterStar = false;
     for (;;) {
@@ -468,19 +471,19 @@ class Parser {
         afterStar = true;
         if (this.at('NAME')) {
           params.varArg = this.expectName();
-          if (this.acceptOp(':')) this.parseTest();
+          if (allowAnnotations && this.acceptOp(':')) this.parseTest();
         }
         if (!this.acceptOp(',')) break;
         continue;
       }
       if (this.acceptOp('**')) {
         params.kwArg = this.expectName();
-        if (this.acceptOp(':')) this.parseTest();
+        if (allowAnnotations && this.acceptOp(':')) this.parseTest();
         this.acceptOp(',');
         break;
       }
       const pname = this.expectName();
-      if (this.acceptOp(':')) this.parseTest(); // annotation, ignored
+      if (allowAnnotations && this.acceptOp(':')) this.parseTest(); // annotation, ignored
       let def = null;
       if (this.acceptOp('=')) {
         def = this.parseTest();
