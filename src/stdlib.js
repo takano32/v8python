@@ -994,9 +994,10 @@ reg('itertools', () => {
     }, 'zip_longest');
   });
 
-  const groupby = bfn('groupby', (args) => {
+  const groupby = bfn('groupby', (args, kwargs) => {
     const arr = iterToArray(args[0]);
-    const keyFn = args.length > 1 && args[1] !== NONE ? args[1] : null;
+    const keyArg = args.length > 1 ? args[1] : getKw(kwargs, 'key', NONE);
+    const keyFn = keyArg !== NONE && keyArg !== undefined ? keyArg : null;
     const keyed = arr.map((x) => [keyFn ? pyCall(keyFn, [x]) : x, x]);
     let i = 0;
     return new PyIterator(() => {

@@ -1415,6 +1415,7 @@ export function runInScope(source, filename, scope, { printExprResults = false }
   FRAMES.push(frame);
   try {
     for (const stmt of ast.body) {
+      frame.line = stmt.line || 1;
       if (printExprResults && stmt.type === 'ExprStmt') {
         const v = runGen(evalExpr(stmt.value, scope, frame));
         if (v !== NONE) {

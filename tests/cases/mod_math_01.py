@@ -1,0 +1,10 @@
+import math
+print(math.sqrt(2))
+print(math.floor(3.7), math.ceil(3.2), math.trunc(-3.7))
+print(math.pi, math.e)
+print(math.gcd(12, 18), math.lcm(4, 6))
+print(math.factorial(5), math.comb(5, 2), math.perm(5, 2))
+print(math.isclose(0.1 + 0.2, 0.3))
+print(math.log(math.e), math.log(8, 2), math.log10(1000), math.log2(8))
+print(math.inf > 1e308, math.isnan(math.nan))
+print(math.gcd(0, 5), math.gcd(0, 0))

@@ -161,9 +161,9 @@ function main() {
   if (args.length === 0) {
     // Defer to REPL module if present; otherwise inform the user.
     import('./src/repl.js').then((repl) => {
-      repl.startRepl();
-    }).catch(() => {
-      process.stderr.write('REPL is not available (src/repl.js missing)\n');
+      repl.startRepl({ printTraceback });
+    }).catch((e) => {
+      process.stderr.write('REPL is not available: ' + e.message + '\n');
       process.exitCode = 2;
     });
     return;
