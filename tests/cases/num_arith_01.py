@@ -1,0 +1,8 @@
+print(7 + 3, 7 - 3, 7 * 3, 7 / 3, 7 // 3, 7 % 3)
+print(2 ** 100)
+print(10 ** 20 + 1)
+print((-7) // 2, (-7) % 2, 7 // -2, 7 % -2)
+print(-7 // 2, -7 % 2)
+print(divmod(17, 5), divmod(-17, 5), divmod(17, -5))
+print(100 / 7)
+print(abs(-5), abs(5), abs(-3.14))

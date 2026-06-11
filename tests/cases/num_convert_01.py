@@ -1,0 +1,7 @@
+print(int('42'), int('-17'), int('  10  '))
+print(int('ff', 16), int('0xff', 16), int('0b101', 0), int('777', 8))
+print(float('3.14'), float('1e3'), float('-0.5'), float('  2.5  '))
+print(int(3.9), int(-3.9), int(3.14))
+print(float(10), float(-5))
+print(str(42), str(3.14), str(True))
+print(int('0o17', 0), int('100', 2))

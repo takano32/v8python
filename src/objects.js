@@ -1775,7 +1775,9 @@ export function computeSlice(slice, len) {
   if (step === 0) raiseError('ValueError', 'slice step cannot be zero');
   let start, stop;
   const defStart = step > 0 ? 0 : len - 1;
-  const defStop = step > 0 ? len : -len - 1;
+  // For a negative step with an omitted stop, the loop bound is -1 so that
+  // index 0 is included (the loop condition is `i > stop`).
+  const defStop = step > 0 ? len : -1;
   if (slice.start === NONE) start = defStart;
   else {
     start = toJsIndex(slice.start);

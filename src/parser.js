@@ -1083,6 +1083,7 @@ class Parser {
       conv: part.conv,
       spec,
       selfDoc: part.selfDoc,
+      selfDocText: part.selfDocText,
       code: part.code,
     };
   }

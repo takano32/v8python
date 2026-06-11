@@ -1,0 +1,23 @@
+s = "abcabcabc"
+print(s.find("bc"))
+print(s.find("bc", 2))
+print(s.find("xy"))
+print(s.rfind("bc"))
+print(s.rfind("xy"))
+print(s.index("c"))
+print(s.count("abc"))
+print(s.count("a"))
+print(s.count(""))
+print(s.replace("a", "X"))
+print(s.replace("a", "X", 2))
+print(s.replace("abc", "-"))
+print("aaa".replace("", "-"))
+try:
+    s.index("zzz")
+except ValueError as e:
+    print(type(e).__name__)
+print("hello".startswith("he"))
+print("hello".endswith("lo"))
+print("hello".startswith(("x", "he")))
+print("hello".endswith(("x", "lo")))
+print("hello".startswith("ll", 2))

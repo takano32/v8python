@@ -312,10 +312,12 @@ export function tokenize(source, filename = '<string>') {
 
   function scanFStringExpr(quote, triple) {
     // pos is just after '{'. Scan a balanced expression.
+    const startPos = pos;
     let code = '';
     let depth = 0;
     let conv = null;
     let selfDoc = false;
+    let selfDocText = null;
     const exprLine = line;
     for (;;) {
       if (pos >= source.length) err("f-string: expecting '}'");
@@ -323,15 +325,23 @@ export function tokenize(source, filename = '<string>') {
       if (ch === '\n' && !triple) err("f-string: expecting '}'");
       if (depth === 0 && ch === '}') {
         pos++; col++;
-        return { type: 'expr', code, conv, spec: null, selfDoc, line: exprLine };
+        return { type: 'expr', code, conv, spec: null, selfDoc, selfDocText, line: exprLine };
       }
       if (depth === 0 && ch === '=' && source[pos + 1] !== '=' &&
-          !'=!<>+-*/%&|^@:'.includes(code[code.length - 1] || '') &&
-          (source[pos + 1] === '}' || source[pos + 1] === '!' || source[pos + 1] === ':')) {
-        // Self-documenting form: f"{expr=}"
-        selfDoc = true;
-        pos++; col++;
-        continue;
+          !'=!<>+-*/%&|^@:'.includes(code[code.length - 1] || '')) {
+        // Self-documenting form: f"{expr=}". Whitespace may surround the '='.
+        let q = pos + 1;
+        while (source[q] === ' ' || source[q] === '\t') q++;
+        const after = source[q];
+        if (after === '}' || after === '!' || after === ':') {
+          selfDoc = true;
+          // The label is the verbatim source from after '{' up to and
+          // including the '=' plus any trailing whitespace.
+          selfDocText = source.slice(startPos, q);
+          col += q - pos;
+          pos = q;
+          continue;
+        }
       }
       if (depth === 0 && ch === '!' && 'rsa'.includes(source[pos + 1] || '') &&
           (source[pos + 2] === '}' || source[pos + 2] === ':')) {
@@ -342,7 +352,7 @@ export function tokenize(source, filename = '<string>') {
       if (depth === 0 && ch === ':') {
         pos++; col++;
         const spec = scanFStringSpec(quote, triple);
-        return { type: 'expr', code, conv, spec, selfDoc, line: exprLine };
+        return { type: 'expr', code, conv, spec, selfDoc, selfDocText, line: exprLine };
       }
       if (ch === '(' || ch === '[' || ch === '{') { depth++; code += ch; pos++; col++; continue; }
       if (ch === ')' || ch === ']' || ch === '}') { depth--; code += ch; pos++; col++; continue; }

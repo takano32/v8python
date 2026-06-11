@@ -1,0 +1,15 @@
+print(list(range(5)))
+print(list(range(2, 8)))
+print(list(range(0, 10, 2)))
+print(list(range(10, 0, -1)))
+print(list(range(0)))
+print(list(range(-3, 3)))
+
+print(list("abc"))
+print(list((1, 2, 3)))
+print(list({1, 2, 3}))
+print(sorted(list({3, 1, 2})))
+
+print(list(range(1000))[-1])
+print(len(list(range(100))))
+print(sum(range(101)))

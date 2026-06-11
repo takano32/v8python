@@ -1,0 +1,8 @@
+print(pow(2, 10), pow(2, 10, 1000))
+print(2 ** 0.5)
+print(-2 ** 2)
+print((-2) ** 2)
+print(2 ** -1)
+print(pow(3, 0), pow(0, 0))
+print(4 ** 0.5, 27 ** (1/3))
+print(2 ** 3 ** 2)

@@ -967,7 +967,8 @@ function* evalExpr(node, scope, frame) {
           }
         }
         if (part.selfDoc) {
-          out += part.code + '=';
+          // selfDocText is the verbatim label including '=' and surrounding spaces.
+          out += part.selfDocText != null ? part.selfDocText : part.code + '=';
           if (part.conv === null && spec === null) {
             out += pyRepr(v);
             continue;

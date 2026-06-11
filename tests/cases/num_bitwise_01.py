@@ -1,0 +1,7 @@
+print(5 & 3, 5 | 3, 5 ^ 3, ~5)
+print(1 << 10, 256 >> 2)
+print(0xff, 0o17, 0b1010)
+print(0xFF & 0x0F)
+print(255 >> 1 << 1)
+print(~0, ~~5)
+print((1 << 64) - 1)

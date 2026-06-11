@@ -1,0 +1,18 @@
+print(str(123))
+print(str(-45))
+print(str(3.14))
+print(repr("a\nb"))
+print(repr("tab\there"))
+print(repr('single'))
+print(repr("has'quote"))
+print(repr('has"quote'))
+print(repr("both'and\""))
+print(repr("back\\slash"))
+s = """line1
+line2"""
+print(s)
+print(repr(s))
+print("a\tb\nc")
+print("あ")
+print(repr("あ"))
+print("quote: \" and \'")

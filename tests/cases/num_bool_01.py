@@ -1,0 +1,6 @@
+print(True + True, True * 3, False + 5)
+print(True and False, True or False)
+print(int(True), int(False), float(True))
+print(1 == True, 0 == False, 2 == True)
+print(bool(0), bool(1), bool(""), bool("x"), bool([]), bool([0]))
+print(True < 2, False < 1)

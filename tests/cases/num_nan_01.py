@@ -1,0 +1,8 @@
+nan = float('nan')
+print(nan == nan)
+print(nan != nan)
+print(nan < 1, nan > 1)
+inf = float('inf')
+print(inf > 1e308, -inf < -1e308)
+print(inf + 1, inf - inf)
+print(1 / inf)
