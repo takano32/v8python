@@ -259,9 +259,15 @@ function bindParams(fnObj, args, kwargs) {
     }
   }
 
-  // Defaults & missing checks.
+  // Defaults & missing checks (same logic for positional and keyword-only).
+  fillDefaultsOrThrow(scope, allPos, fnObj, fname, 'positional');
+  fillDefaultsOrThrow(scope, p.kwOnly, fnObj, fname, 'keyword-only');
+  return scope;
+}
+
+function fillDefaultsOrThrow(scope, params, fnObj, fname, kind) {
   const missing = [];
-  for (const param of allPos) {
+  for (const param of params) {
     if (!scope.vars.has(param.name)) {
       if (fnObj.defaults.has(param.name)) {
         scope.vars.set(param.name, fnObj.defaults.get(param.name));
@@ -272,23 +278,8 @@ function bindParams(fnObj, args, kwargs) {
   }
   if (missing.length) {
     raiseError('TypeError',
-      `${fname}() missing ${missing.length} required positional argument${missing.length === 1 ? '' : 's'}: ${missing.map((m) => `'${m}'`).join(' and ')}`);
+      `${fname}() missing ${missing.length} required ${kind} argument${missing.length === 1 ? '' : 's'}: ${missing.map((m) => `'${m}'`).join(' and ')}`);
   }
-  const missingKw = [];
-  for (const param of p.kwOnly) {
-    if (!scope.vars.has(param.name)) {
-      if (fnObj.defaults.has(param.name)) {
-        scope.vars.set(param.name, fnObj.defaults.get(param.name));
-      } else {
-        missingKw.push(param.name);
-      }
-    }
-  }
-  if (missingKw.length) {
-    raiseError('TypeError',
-      `${fname}() missing ${missingKw.length} required keyword-only argument${missingKw.length === 1 ? '' : 's'}: ${missingKw.map((m) => `'${m}'`).join(' and ')}`);
-  }
-  return scope;
 }
 
 export function* callFunction(fnObj, args, kwargs) {
@@ -765,7 +756,7 @@ function* makeFunction(node, scope, frame, isLambda) {
   const fnObj = new PyFunction(
     isLambda ? '<lambda>' : node.name,
     node.params,
-    isLambda ? node.body : node.body,
+    node.body,
     scope,
     {
       locals: node.scopeInfo.locals,
@@ -819,12 +810,7 @@ function* execClassDef(node, scope, frame) {
   yield* execBlock(node.body, classScope, frame);
 
   const attrs = new Map(classScope.vars);
-  let cls;
-  try {
-    cls = new PyType(node.name, effectiveBases, attrs, { module: frame.moduleName || '__main__' });
-  } catch (e) {
-    throw e;
-  }
+  const cls = new PyType(node.name, effectiveBases, attrs, { module: frame.moduleName || '__main__' });
   for (const v of attrs.values()) {
     if (v instanceof PyFunction && !v.definingClass) v.definingClass = cls;
     if (v instanceof PyClassMethod && v.func instanceof PyFunction && !v.func.definingClass) {
@@ -1183,8 +1169,7 @@ function* evalExpr(node, scope, frame) {
 }
 
 function pyIs(a, b) {
-  if (a === b) return true;
-  return false;
+  return a === b;
 }
 
 // ---------- comprehensions ----------

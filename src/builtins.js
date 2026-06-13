@@ -61,34 +61,20 @@ function kwOnly(kwargs, allowed, fname) {
   return out;
 }
 
-function asStr(self, methName) {
-  const v = unwrap(self);
-  if (typeof v !== 'string') {
-    raiseError('TypeError', `descriptor '${methName}' requires a 'str' object but received a '${typeOf(self).name}'`);
-  }
-  return v;
+// Build an unwrap-and-typecheck helper for a builtin-method `self` argument.
+function makeAsType(typeName, pred) {
+  return (self, methName) => {
+    const v = unwrap(self);
+    if (!pred(v)) {
+      raiseError('TypeError', `descriptor '${methName}' requires a '${typeName}' object but received a '${typeOf(self).name}'`);
+    }
+    return v;
+  };
 }
-function asList(self, methName) {
-  const v = unwrap(self);
-  if (!(v instanceof PyList)) {
-    raiseError('TypeError', `descriptor '${methName}' requires a 'list' object but received a '${typeOf(self).name}'`);
-  }
-  return v;
-}
-function asDict(self, methName) {
-  const v = unwrap(self);
-  if (!(v instanceof PyDict)) {
-    raiseError('TypeError', `descriptor '${methName}' requires a 'dict' object but received a '${typeOf(self).name}'`);
-  }
-  return v;
-}
-function asSet(self, methName) {
-  const v = unwrap(self);
-  if (!(v instanceof PySet)) {
-    raiseError('TypeError', `descriptor '${methName}' requires a 'set' object but received a '${typeOf(self).name}'`);
-  }
-  return v;
-}
+const asStr = makeAsType('str', (v) => typeof v === 'string');
+const asList = makeAsType('list', (v) => v instanceof PyList);
+const asDict = makeAsType('dict', (v) => v instanceof PyDict);
+const asSet = makeAsType('set', (v) => v instanceof PySet);
 
 const cp = (s) => [...s]; // code point array
 
