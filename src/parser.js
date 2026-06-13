@@ -111,7 +111,7 @@ class Parser {
           this.next();
           let value = null;
           if (!this.at('NEWLINE') && !this.atOp(';') && !this.at('EOF') && !this.at('DEDENT')) {
-            value = this.parseTestListAllowYield();
+            value = this.parseTestListStarAllowYield();
           }
           return { type: 'Return', value, line };
         }
@@ -291,32 +291,16 @@ class Parser {
     return this.parseSimpleStatements();
   }
 
-  parseIf() {
+  // Handles both `if` and `elif` (the latter recurses as a nested If node).
+  parseIf(kw = 'if') {
     const line = this.peek().line;
-    this.expectKw('if');
+    this.expectKw(kw);
     const test = this.parseNamedExpr();
     this.expectOp(':');
     const body = this.parseBlock();
     let orelse = [];
     if (this.atKw('elif')) {
-      orelse = [this.parseIf2()];
-    } else if (this.acceptKw('else')) {
-      this.expectOp(':');
-      orelse = this.parseBlock();
-    }
-    return { type: 'If', test, body, orelse, line };
-  }
-
-  parseIf2() {
-    // elif handled as nested If
-    const line = this.peek().line;
-    this.expectKw('elif');
-    const test = this.parseNamedExpr();
-    this.expectOp(':');
-    const body = this.parseBlock();
-    let orelse = [];
-    if (this.atKw('elif')) {
-      orelse = [this.parseIf2()];
+      orelse = [this.parseIf('elif')];
     } else if (this.acceptKw('else')) {
       this.expectOp(':');
       orelse = this.parseBlock();
@@ -526,11 +510,7 @@ class Parser {
 
   // ---------- expressions ----------
 
-  parseTestListAllowYield() {
-    if (this.atKw('yield')) return this.parseYield();
-    return this.parseTestListStar();
-  }
-
+  // testlist (or star-expr list) where a bare `yield` expression is also allowed.
   parseTestListStarAllowYield() {
     if (this.atKw('yield')) return this.parseYield();
     return this.parseTestListStar();

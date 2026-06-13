@@ -32,7 +32,7 @@ import {
   TYPE_OBJECT, TYPE_DICT, EXC,
   raiseError, pyCall, numToBigInt, bigIntToNumber, iterToArray, pyTruthy,
   pyEq, pyStr, pyRepr, typeOf, unwrap, isNum, hashKey, richCompare,
-  binOp, unaryOp, getItem, getAttr, pyIter,
+  binOp, unaryOp, getItem, getAttr, pyIter, pyContains,
 } from './objects.js';
 import { floatRepr } from './fmt.js';
 import { IO } from './builtins.js';
@@ -165,7 +165,7 @@ reg('operator', () => {
     ge: cmpWrap('ge', '>='),
     eq: bfn('eq', (args) => pyEq(args[0], args[1])),
     ne: bfn('ne', (args) => !pyEq(args[0], args[1])),
-    contains: bfn('contains', (args) => pyTruthy(richContains(args[1], args[0]))),
+    contains: bfn('contains', (args) => pyContains(args[1], args[0])),
     getitem: bfn('getitem', (args) => getItem(args[0], args[1])),
     concat: binWrap('concat', '+'),
     index: bfn('index', (args) => numToBigInt(args[0])),
@@ -202,22 +202,6 @@ reg('operator', () => {
   };
   return mkmod('operator', entries);
 });
-
-function richContains(container, item) {
-  // operator.contains(a, b) == (b in a). Reuse pyContains via objects? Not exported here;
-  // emulate with iteration / pyEq for the common path.
-  const c = unwrap(container);
-  if (typeof c === 'string') return c.includes(unwrap(item));
-  if (c instanceof PyList || c instanceof PyTuple) return c.items.some((x) => pyEq(x, item));
-  if (c instanceof PyDict) return c.has(item);
-  if (c instanceof PySet) return c.has(item);
-  const it = pyIter(container);
-  for (;;) {
-    const x = it.next();
-    if (x === DONE) return false;
-    if (pyEq(x, item)) return true;
-  }
-}
 
 // ---------- math ----------
 
@@ -1368,6 +1352,16 @@ reg('collections', () => {
 
   // ----- Counter -----
   const Counter = new PyType('Counter', [TYPE_DICT], new Map(), { module: 'collections' });
+  // Entries sorted by count descending, ties broken by insertion order.
+  function counterSorted(pd) {
+    return [...pd.entries()]
+      .map((e, idx) => ({ e, idx }))
+      .sort((a, b) => {
+        const c = richCompare('>', a.e[1], b.e[1]) ? -1 : richCompare('<', a.e[1], b.e[1]) ? 1 : 0;
+        return c !== 0 ? c : a.idx - b.idx;
+      })
+      .map((x) => x.e);
+  }
   function counterAdd(pd, src) {
     const u = unwrap(src);
     if (u instanceof PyDict) {
@@ -1392,14 +1386,7 @@ reg('collections', () => {
   };
   Counter.attrs.set('__missing__', new PyBuiltin('__missing__', () => 0n, true));
   Counter.attrs.set('most_common', new PyBuiltin('most_common', (self, args) => {
-    const entries = [...self.payload.entries()];
-    const sorted = entries
-      .map((e, idx) => ({ e, idx }))
-      .sort((a, b) => {
-        const c = richCompare('>', a.e[1], b.e[1]) ? -1 : richCompare('<', a.e[1], b.e[1]) ? 1 : 0;
-        return c !== 0 ? c : a.idx - b.idx;
-      })
-      .map((x) => new PyTuple([x.e[0], x.e[1]]));
+    const sorted = counterSorted(self.payload).map(([k, v]) => new PyTuple([k, v]));
     if (args.length && args[0] !== NONE) {
       return new PyList(sorted.slice(0, Number(numToBigInt(args[0]))));
     }
@@ -1431,15 +1418,9 @@ reg('collections', () => {
     return s;
   }, true));
   Counter.attrs.set('__repr__', new PyBuiltin('__repr__', (self) => {
-    const entries = [...self.payload.entries()];
-    if (!entries.length) return 'Counter()';
-    const sorted = entries
-      .map((e, idx) => ({ e, idx }))
-      .sort((a, b) => {
-        const c = richCompare('>', a.e[1], b.e[1]) ? -1 : richCompare('<', a.e[1], b.e[1]) ? 1 : 0;
-        return c !== 0 ? c : a.idx - b.idx;
-      });
-    return 'Counter({' + sorted.map((x) => pyRepr(x.e[0]) + ': ' + pyRepr(x.e[1])).join(', ') + '})';
+    const sorted = counterSorted(self.payload);
+    if (!sorted.length) return 'Counter()';
+    return 'Counter({' + sorted.map(([k, v]) => pyRepr(k) + ': ' + pyRepr(v)).join(', ') + '})';
   }, true));
 
   // ----- deque -----
