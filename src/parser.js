@@ -78,13 +78,191 @@ class Parser {
         case 'def': return [this.parseFunctionDef([])];
         case 'class': return [this.parseClassDef([])];
         case 'async': {
-          this.err("'async' is not supported");
+          this.next(); // consume 'async'
+          if (this.atKw('def')) { const f = this.parseFunctionDef([]); f.isAsync = true; return [f]; }
+          if (this.atKw('for')) { const f = this.parseFor(); f.isAsync = true; return [f]; }
+          if (this.atKw('with')) { const w = this.parseWith(); w.isAsync = true; return [w]; }
+          this.err('invalid syntax after async');
           break;
         }
       }
     }
     if (this.atOp('@')) return [this.parseDecorated()];
+    // `match` is a soft keyword: only a match statement when the structure fits.
+    if (t.type === 'NAME' && t.value === 'match') {
+      const m = this.tryParseMatch();
+      if (m) return [m];
+    }
     return this.parseSimpleStatements();
+  }
+
+  tryParseMatch() {
+    const save = this.pos;
+    this.next(); // consume 'match'
+    let subject;
+    try { subject = this.parseTestListStar(); } catch (e) { this.pos = save; return null; }
+    if (!this.acceptOp(':')) { this.pos = save; return null; }
+    if (!this.accept('NEWLINE') || !this.accept('INDENT')
+        || !(this.at('NAME') && this.peek().value === 'case')) {
+      this.pos = save; return null;
+    }
+    const line = this.tokens[save].line;
+    const cases = [];
+    while (this.at('NAME') && this.peek().value === 'case') {
+      cases.push(this.parseCaseBlock());
+      while (this.accept('NEWLINE')) { /* skip blanks */ }
+    }
+    this.expect('DEDENT');
+    return { type: 'Match', subject, cases, line };
+  }
+
+  parseCaseBlock() {
+    const line = this.peek().line;
+    this.next(); // 'case'
+    const pattern = this.parsePatternTop();
+    let guard = null;
+    if (this.acceptKw('if')) guard = this.parseNamedExpr();
+    this.expectOp(':');
+    const body = this.parseBlock();
+    return { pattern, guard, body, line };
+  }
+
+  parsePatternTop() {
+    const first = this.parseOrPatternAs();
+    if (this.atOp(',')) {
+      const patterns = [first];
+      while (this.acceptOp(',')) {
+        if (this.atOp(':') || this.atKw('if')) break;
+        patterns.push(this.parseOrPatternAs());
+      }
+      return { ptype: 'sequence', patterns };
+    }
+    return first;
+  }
+
+  parseOrPatternAs() {
+    const p = this.parseOrPattern();
+    if (this.acceptKw('as')) {
+      const name = this.expectName();
+      return { ptype: 'as', pattern: p, name };
+    }
+    return p;
+  }
+
+  parseOrPattern() {
+    const first = this.parseClosedPattern();
+    if (!this.atOp('|')) return first;
+    const patterns = [first];
+    while (this.acceptOp('|')) patterns.push(this.parseClosedPattern());
+    return { ptype: 'or', patterns };
+  }
+
+  parseClosedPattern() {
+    if (this.atOp('*')) {
+      this.next();
+      const name = this.expectName();
+      return { ptype: 'star', name: name === '_' ? null : name };
+    }
+    if (this.atOp('[')) return this.parseSequencePattern(']');
+    if (this.atOp('(')) return this.parseSequencePattern(')');
+    if (this.atOp('{')) return this.parseMappingPattern();
+    const t = this.peek();
+    // literal value patterns: numbers (optionally signed), strings, None/True/False
+    if (t.type === 'NUMBER' || t.type === 'STRING' || t.type === 'FSTRING'
+        || this.atOp('-') || this.atOp('+')
+        || this.atKw('None') || this.atKw('True') || this.atKw('False')) {
+      return { ptype: 'value', expr: this.parsePatternLiteralExpr() };
+    }
+    if (t.type === 'NAME') {
+      // dotted name: capture (bare), value pattern (dotted), or class pattern ('(')
+      let expr = { type: 'Name', id: this.next().value, line: t.line };
+      let dotted = false;
+      while (this.atOp('.')) {
+        this.next();
+        expr = { type: 'Attribute', obj: expr, attr: this.expectName(), line: t.line };
+        dotted = true;
+      }
+      if (this.atOp('(')) return this.parseClassPattern(expr);
+      if (dotted) return { ptype: 'value', expr };
+      if (expr.id === '_') return { ptype: 'wildcard' };
+      return { ptype: 'capture', name: expr.id };
+    }
+    this.err('invalid pattern');
+  }
+
+  // A literal expression usable in a value pattern (number, signed number,
+  // complex sum like 1+2j, string, None/True/False).
+  parsePatternLiteralExpr() {
+    const line = this.peek().line;
+    let sign = null;
+    if (this.atOp('-') || this.atOp('+')) sign = this.next().value;
+    if (this.atKw('None')) { this.next(); return { type: 'Const', value: null, line }; }
+    if (this.atKw('True')) { this.next(); return { type: 'Const', value: true, line }; }
+    if (this.atKw('False')) { this.next(); return { type: 'Const', value: false, line }; }
+    if (this.at('STRING') || this.at('FSTRING')) {
+      return this.parseAtom();
+    }
+    let expr = this.parseAtom();
+    if (sign === '-') expr = { type: 'UnaryOp', op: '-', operand: expr, line };
+    // complex literal sum: <real> ('+'|'-') <imag>j
+    if (this.atOp('+') || this.atOp('-')) {
+      const op = this.next().value;
+      const imag = this.parseAtom();
+      expr = { type: 'BinOp', op, left: expr, right: imag, line };
+    }
+    return expr;
+  }
+
+  parseSequencePattern(close) {
+    const line = this.peek().line;
+    this.next(); // [ or (
+    const patterns = [];
+    while (!this.atOp(close)) {
+      patterns.push(this.parseOrPatternAs());
+      if (!this.acceptOp(',')) break;
+    }
+    this.expectOp(close);
+    return { ptype: 'sequence', patterns };
+  }
+
+  parseMappingPattern() {
+    const line = this.peek().line;
+    this.next(); // {
+    const keys = [];
+    const patterns = [];
+    let rest = null;
+    while (!this.atOp('}')) {
+      if (this.acceptOp('**')) {
+        rest = this.expectName();
+        this.acceptOp(',');
+        break;
+      }
+      keys.push(this.parsePatternLiteralExpr());
+      this.expectOp(':');
+      patterns.push(this.parseOrPatternAs());
+      if (!this.acceptOp(',')) break;
+    }
+    this.expectOp('}');
+    return { ptype: 'mapping', keys, patterns, rest };
+  }
+
+  parseClassPattern(clsExpr) {
+    this.next(); // (
+    const posPatterns = [];
+    const kwNames = [];
+    const kwPatterns = [];
+    while (!this.atOp(')')) {
+      if (this.at('NAME') && this.peek(1) && this.peek(1).type === 'OP' && this.peek(1).value === '=') {
+        kwNames.push(this.next().value);
+        this.next(); // =
+        kwPatterns.push(this.parseOrPatternAs());
+      } else {
+        posPatterns.push(this.parseOrPatternAs());
+      }
+      if (!this.acceptOp(',')) break;
+    }
+    this.expectOp(')');
+    return { ptype: 'class', cls: clsExpr, posPatterns, kwNames, kwPatterns };
   }
 
   parseSimpleStatements() {
@@ -418,6 +596,7 @@ class Parser {
     }
     if (this.atKw('def')) return this.parseFunctionDef(decorators);
     if (this.atKw('class')) return this.parseClassDef(decorators);
+    if (this.atKw('async')) { this.next(); const f = this.parseFunctionDef(decorators); f.isAsync = true; return f; }
     this.err('invalid decorator target');
   }
 
@@ -831,6 +1010,9 @@ class Parser {
         const text = t.value.text.replace(/_/g, '');
         return { type: 'Num', value: BigInt(text), line };
       }
+      if (t.value.kind === 'imaginary') {
+        return { type: 'Num', value: parseFloat(t.value.text.replace(/_/g, '')), imaginary: true, line };
+      }
       return { type: 'Num', value: parseFloat(t.value.text.replace(/_/g, '')), line };
     }
 
@@ -885,7 +1067,7 @@ class Parser {
         case 'lambda': return this.parseLambda();
         case 'not': return this.parseNot();
         case 'yield': return this.parseYield();
-        case 'await': this.err("'await' is not supported");
+        case 'await': { this.next(); return { type: 'Await', value: this.parsePostfix(), line }; }
       }
       this.err('invalid syntax');
     }
@@ -1245,7 +1427,38 @@ export function analyzeScopes(moduleNode, filename) {
           current().assigned.delete(n);
         }
         break;
+      case 'Match':
+        visit(node.subject);
+        for (const c of node.cases) {
+          visitPattern(c.pattern);
+          if (c.guard) visit(c.guard);
+          c.body.forEach(visitStmt);
+        }
+        break;
       case 'Pass': case 'Break': case 'Continue': break;
+      default: break;
+    }
+  }
+
+  function visitPattern(p) {
+    if (!p) return;
+    switch (p.ptype) {
+      case 'capture': addAssigned(p.name); break;
+      case 'star': if (p.name) addAssigned(p.name); break;
+      case 'as': visitPattern(p.pattern); addAssigned(p.name); break;
+      case 'or': p.patterns.forEach(visitPattern); break;
+      case 'sequence': p.patterns.forEach(visitPattern); break;
+      case 'value': visit(p.expr); break;
+      case 'mapping':
+        p.keys.forEach(visit);
+        p.patterns.forEach(visitPattern);
+        if (p.rest) addAssigned(p.rest);
+        break;
+      case 'class':
+        visit(p.cls);
+        p.posPatterns.forEach(visitPattern);
+        p.kwPatterns.forEach(visitPattern);
+        break;
       default: break;
     }
   }
@@ -1284,6 +1497,7 @@ export function analyzeScopes(moduleNode, filename) {
       case 'ListComp': case 'SetComp': case 'GeneratorExp': case 'DictComp':
         visitComprehension(node);
         break;
+      case 'Await': visit(node.value); break;
       case 'Yield': case 'YieldFrom': {
         visit(node.value);
         // Mark the nearest function as a generator.

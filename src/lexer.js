@@ -159,7 +159,8 @@ export function tokenize(source, filename = '<string>') {
       }
     }
     if (peek() === 'j' || peek() === 'J') {
-      err('complex literals are not supported');
+      pos++; col++;
+      kind = 'imaginary';
     }
     if (s.endsWith('_') || s.includes('__')) err('invalid decimal literal');
     tokens.push({ type: 'NUMBER', value: { kind, text: s }, line: startLine, col: startCol });

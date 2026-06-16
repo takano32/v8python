@@ -4,8 +4,10 @@ import {
   NONE, NOT_IMPLEMENTED, PY_ELLIPSIS, DONE,
   PyList, PyTuple, PyDict, PySet, PyRange, PySlice, PyFunction, PyBuiltin,
   PyBoundMethod, PyType, PyInstance, PyModule, PyProperty, PyClassMethod,
-  PyStaticMethod, PySuper, PyIterator, PyGenerator, PyError, PyFile,
-  TYPE_OBJECT, TYPE_TYPE, TYPE_INT, TYPE_BOOL, TYPE_FLOAT, TYPE_STR,
+  PyStaticMethod, PySuper, PyIterator, PyGenerator, PyError, PyFile, PyComplex, PyBytes,
+  bytesRepr,
+  TYPE_OBJECT, TYPE_TYPE, TYPE_INT, TYPE_BOOL, TYPE_FLOAT, TYPE_STR, TYPE_COMPLEX,
+  TYPE_BYTES, TYPE_BYTEARRAY,
   TYPE_LIST, TYPE_TUPLE, TYPE_DICT, TYPE_SET, TYPE_FROZENSET, TYPE_RANGE,
   TYPE_SLICE, TYPE_NONE, TYPE_GENERATOR, TYPE_ITERATOR, TYPE_PROPERTY,
   TYPE_CLASSMETHOD, TYPE_STATICMETHOD, TYPE_FILE, TYPE_MODULE,
@@ -15,6 +17,7 @@ import {
   pyIter, iterToArray, pyRepr, pyStr, pyFormat, pyLen, binOp,
   numToBigInt, toJsIndex, bigIntToNumber, isNum, cmpNum, objId,
   getItem, setItem, computeSlice, mroLookup, bindClassAttr, FileOps,
+  defaultInstanceGetAttr,
 } from './objects.js';
 import {
   floatRepr, roundHalfEvenToInt, roundToDigits, floatParts, exactScaled,
@@ -207,6 +210,184 @@ function floatConstruct(args, kwargs) {
 
 TYPE_INT.construct = intConstruct;
 TYPE_FLOAT.construct = floatConstruct;
+const toFloatNum = (v) => {
+  const u = unwrap(v);
+  if (typeof u === 'number') return u;
+  if (typeof u === 'bigint') return Number(u);
+  if (typeof u === 'boolean') return u ? 1 : 0;
+  return null;
+};
+TYPE_COMPLEX.construct = (args, kwargs) => {
+  noKw('complex', kwargs);
+  checkArgs('complex', args, 0, 2);
+  if (args.length === 0) return new PyComplex(0, 0);
+  const first = unwrap(args[0]);
+  if (typeof first === 'string' && args.length === 1) {
+    let s = first.trim().replace(/^\(|\)$/g, '');
+    s = s.replace(/[jJ]/g, 'j');
+    const m = s.match(/^([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)?([+-](?:\d+\.?\d*|\.\d+)?(?:[eE][+-]?\d+)?)?j$/);
+    if (m) {
+      const re = m[1] ? parseFloat(m[1]) : 0;
+      let imStr = m[2];
+      let im;
+      if (imStr === undefined) { im = m[1] ? 0 : 1; }
+      else if (imStr === '+' || imStr === '') im = 1;
+      else if (imStr === '-') im = -1;
+      else im = parseFloat(imStr);
+      // pure imaginary like "3j": m[1] captured "3"? then it's real... handle "3j"
+      if (m[1] && m[2] === undefined) return new PyComplex(0, parseFloat(m[1]));
+      return new PyComplex(re, im);
+    }
+    const rm = s.match(/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/);
+    if (rm) return new PyComplex(parseFloat(s), 0);
+    raiseError('ValueError', `complex() arg is a malformed string`);
+  }
+  if (first instanceof PyComplex && args.length === 1) return new PyComplex(first.re, first.im);
+  const reC = first instanceof PyComplex ? first : { re: toFloatNum(args[0]), im: 0 };
+  if (reC.re === null) raiseError('TypeError', "complex() first argument must be a string or a number");
+  let imC = { re: 0, im: 0 };
+  if (args.length === 2) {
+    const a1 = unwrap(args[1]);
+    imC = a1 instanceof PyComplex ? a1 : { re: toFloatNum(args[1]), im: 0 };
+    if (imC.re === null) raiseError('TypeError', "complex() second argument must be a number");
+  }
+  // (a+bi) + (c+di)*i = (a-d) + (b+c)i
+  return new PyComplex(reC.re - imC.im, reC.im + imC.re);
+};
+meth(TYPE_COMPLEX, 'conjugate', (self) => { const c = unwrap(self); return new PyComplex(c.re, -c.im); });
+meth(TYPE_COMPLEX, '__abs__', (self) => { const c = unwrap(self); return Math.hypot(c.re, c.im); });
+meth(TYPE_COMPLEX, '__bool__', (self) => { const c = unwrap(self); return c.re !== 0 || c.im !== 0; });
+meth(TYPE_COMPLEX, '__hash__', (self) => { const c = unwrap(self); return BigInt(Math.trunc(c.re)) + BigInt(Math.trunc(c.im)); });
+TYPE_COMPLEX.attrs.set('real', new PyProperty(new PyBuiltin('real', (self) => unwrap(self).re, true)));
+TYPE_COMPLEX.attrs.set('imag', new PyProperty(new PyBuiltin('imag', (self) => unwrap(self).im, true)));
+
+// ---------- bytes / bytearray ----------
+
+const asByte = (v, name) => {
+  const n = Number(numToBigInt(v));
+  if (n < 0 || n > 255) raiseError('ValueError', `${name} must be in range(0, 256)`);
+  return n;
+};
+function bytesFromArg(args, kwargs, mutable, name) {
+  if (args.length === 0 || args[0] === NONE) return new PyBytes([], mutable);
+  const a = args[0];
+  const u = unwrap(a);
+  if (typeof u === 'bigint' || typeof u === 'boolean') {
+    return new PyBytes(new Array(Number(numToBigInt(a))).fill(0), mutable);
+  }
+  if (typeof u === 'string') {
+    const enc = args.length > 1 && args[1] !== NONE ? args[1] : (kwargs && kwargs.has('encoding') ? kwargs.get('encoding') : null);
+    if (enc === null) raiseError('TypeError', 'string argument without an encoding');
+    return new PyBytes([...pyCall(getAttr(a, 'encode'), [enc]).bytes], mutable);
+  }
+  if (u instanceof PyBytes) return new PyBytes([...u.bytes], mutable);
+  return new PyBytes(iterToArray(a).map((x) => asByte(x, name)), mutable);
+}
+TYPE_BYTES.construct = (args, kwargs) => bytesFromArg(args, kwargs, false, 'bytes');
+TYPE_BYTEARRAY.construct = (args, kwargs) => bytesFromArg(args, kwargs, true, 'bytearray');
+
+const asBytesVal = (self, name) => {
+  const v = unwrap(self);
+  if (!(v instanceof PyBytes)) raiseError('TypeError', `descriptor '${name}' requires a bytes-like object`);
+  return v;
+};
+const bytesToStr = (arr, enc) => {
+  const e = (enc || 'utf-8').toLowerCase().replace(/-/g, '');
+  if (e === 'ascii' || e === 'latin1' || e === 'iso88591') {
+    let s = '';
+    for (const b of arr) { if (e === 'ascii' && b > 0x7f) raiseError('UnicodeDecodeError', `'ascii' codec can't decode byte`); s += String.fromCharCode(b); }
+    return s;
+  }
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(arr)); }
+  catch (e2) { raiseError('UnicodeDecodeError', `'utf-8' codec can't decode bytes`); }
+};
+for (const T of [TYPE_BYTES, TYPE_BYTEARRAY]) {
+  const isBA = T === TYPE_BYTEARRAY;
+  const wrap = (arr) => new PyBytes(arr, isBA);
+  meth(T, 'decode', (self, args, kwargs) => bytesToStr(asBytesVal(self, 'decode').bytes, args.length && args[0] !== NONE ? unwrap(args[0]) : (kwargs && kwargs.has('encoding') ? unwrap(kwargs.get('encoding')) : 'utf-8')));
+  meth(T, 'hex', (self, args) => {
+    const arr = asBytesVal(self, 'hex').bytes;
+    const sep = args.length && args[0] !== NONE ? unwrap(args[0]) : '';
+    return arr.map((b) => b.toString(16).padStart(2, '0')).join(sep);
+  });
+  classMeth(T, 'fromhex', (cls, args) => {
+    const s = unwrap(args[0]).replace(/\s+/g, '');
+    if (s.length % 2) raiseError('ValueError', 'non-hexadecimal number found in fromhex() arg');
+    const arr = [];
+    for (let i = 0; i < s.length; i += 2) arr.push(parseInt(s.slice(i, i + 2), 16));
+    return wrap(arr);
+  });
+  meth(T, 'upper', (self) => wrap(asBytesVal(self, 'upper').bytes.map((b) => (b >= 97 && b <= 122 ? b - 32 : b))));
+  meth(T, 'lower', (self) => wrap(asBytesVal(self, 'lower').bytes.map((b) => (b >= 65 && b <= 90 ? b + 32 : b))));
+  meth(T, 'startswith', (self, args) => {
+    const arr = asBytesVal(self, 'startswith').bytes; const p = unwrap(args[0]).bytes;
+    return arr.length >= p.length && p.every((b, i) => arr[i] === b);
+  });
+  meth(T, 'endswith', (self, args) => {
+    const arr = asBytesVal(self, 'endswith').bytes; const p = unwrap(args[0]).bytes;
+    return arr.length >= p.length && p.every((b, i) => arr[arr.length - p.length + i] === b);
+  });
+  meth(T, 'count', (self, args) => {
+    const arr = asBytesVal(self, 'count').bytes; const sub = unwrap(args[0]).bytes;
+    if (!sub.length) return BigInt(arr.length + 1);
+    let n = 0;
+    for (let i = 0; i + sub.length <= arr.length; i++) if (sub.every((b, j) => arr[i + j] === b)) { n++; i += sub.length - 1; }
+    return BigInt(n);
+  });
+  meth(T, 'find', (self, args) => {
+    const arr = asBytesVal(self, 'find').bytes; const sub = unwrap(args[0]).bytes;
+    for (let i = 0; i + sub.length <= arr.length; i++) if (sub.every((b, j) => arr[i + j] === b)) return BigInt(i);
+    return -1n;
+  });
+  meth(T, 'replace', (self, args) => {
+    const arr = asBytesVal(self, 'replace').bytes; const old = unwrap(args[0]).bytes; const neu = unwrap(args[1]).bytes;
+    const out = []; let i = 0;
+    while (i < arr.length) {
+      if (old.length && i + old.length <= arr.length && old.every((b, j) => arr[i + j] === b)) { out.push(...neu); i += old.length; }
+      else out.push(arr[i++]);
+    }
+    return wrap(out);
+  });
+  meth(T, 'split', (self, args) => {
+    const arr = asBytesVal(self, 'split').bytes;
+    const sep = args.length && args[0] !== NONE ? unwrap(args[0]).bytes : null;
+    const parts = [];
+    if (sep === null) {
+      let cur = [];
+      for (const b of arr) { if (b === 0x20 || b === 0x09 || b === 0x0a || b === 0x0d) { if (cur.length) { parts.push(wrap(cur)); cur = []; } } else cur.push(b); }
+      if (cur.length) parts.push(wrap(cur));
+    } else {
+      let cur = []; let i = 0;
+      while (i < arr.length) {
+        if (i + sep.length <= arr.length && sep.every((b, j) => arr[i + j] === b)) { parts.push(wrap(cur)); cur = []; i += sep.length; }
+        else cur.push(arr[i++]);
+      }
+      parts.push(wrap(cur));
+    }
+    return new PyList(parts);
+  });
+  meth(T, 'join', (self, args) => {
+    const sep = asBytesVal(self, 'join').bytes; const out = []; let first = true;
+    for (const part of iterToArray(args[0])) { if (!first) out.push(...sep); first = false; out.push(...unwrap(part).bytes); }
+    return wrap(out);
+  });
+  meth(T, 'strip', (self, args) => {
+    const arr = asBytesVal(self, 'strip').bytes.slice();
+    const ws = args.length && args[0] !== NONE ? unwrap(args[0]).bytes : [0x20, 0x09, 0x0a, 0x0d, 0x0b, 0x0c];
+    while (arr.length && ws.includes(arr[0])) arr.shift();
+    while (arr.length && ws.includes(arr[arr.length - 1])) arr.pop();
+    return wrap(arr);
+  });
+  meth(T, '__repr__', (self) => { const v = asBytesVal(self, '__repr__'); return v.mutable ? `bytearray(${bytesRepr(v.bytes)})` : bytesRepr(v.bytes); });
+}
+// bytearray mutation
+meth(TYPE_BYTEARRAY, 'append', (self, args) => { unwrap(self).bytes.push(asByte(args[0], 'byte')); return NONE; });
+meth(TYPE_BYTEARRAY, 'extend', (self, args) => { for (const x of iterToArray(args[0])) unwrap(self).bytes.push(asByte(x, 'byte')); return NONE; });
+meth(TYPE_BYTEARRAY, '__setitem__', (self, args) => {
+  const v = unwrap(self); let i = Number(numToBigInt(args[0])); if (i < 0) i += v.bytes.length;
+  if (i < 0 || i >= v.bytes.length) raiseError('IndexError', 'bytearray index out of range');
+  v.bytes[i] = asByte(args[1], 'byte'); return NONE;
+});
 TYPE_BOOL.construct = (args, kwargs) => {
   noKw('bool', kwargs);
   checkArgs('bool', args, 0, 1);
@@ -298,6 +479,19 @@ TYPE_TYPE.construct = (args, kwargs) => {
   const effectiveBases = bases.length ? bases : [TYPE_OBJECT];
   return new PyType(name, effectiveBases, attrs, { module: '__main__' });
 };
+
+// type.__new__(mcs, name, bases, namespace) — used by custom metaclasses via super().
+TYPE_TYPE.attrs.set('__new__', new PyBuiltin('__new__', (args) => {
+  const [mcs, name, basesT, ns] = args;
+  const bases = unwrap(basesT) instanceof PyTuple ? [...unwrap(basesT).items] : [TYPE_OBJECT];
+  const attrs = new Map();
+  if (unwrap(ns) instanceof PyDict) {
+    for (const [k, v] of unwrap(ns).entries()) if (typeof k === 'string') attrs.set(k, v);
+  }
+  const cls = new PyType(unwrap(name), bases.length ? bases : [TYPE_OBJECT], attrs, { module: '__main__' });
+  if (mcs instanceof PyType && mcs !== TYPE_TYPE) cls.metatype = mcs;
+  return cls;
+}, false));
 
 // Exception type constructors.
 for (const t of Object.values(EXC)) {
@@ -740,8 +934,83 @@ meth(TYPE_STR, 'format_map', (self, args) => {
   }
   return strFormat(asStr(self, 'format_map'), [], kw, map);
 });
-meth(TYPE_STR, 'encode', (self) => {
-  raiseError('NotImplementedError', 'bytes are not supported in this implementation');
+meth(TYPE_STR, 'translate', (self, args) => {
+  checkArgs('translate', args, 1, 1);
+  const s = asStr(self, 'translate');
+  const table = args[0];
+  const t = unwrap(table);
+  let out = '';
+  for (const ch of cp(s)) {
+    const ord = BigInt(ch.codePointAt(0));
+    let val;
+    if (t instanceof PyDict) {
+      const e = t.getEntry(ord);
+      if (!e) { out += ch; continue; }
+      val = e.value;
+    } else {
+      try {
+        val = getItem(table, ord);
+      } catch (e) {
+        if (e instanceof PyError && isInstanceOf(e.pyExc, EXC.LookupError)) { out += ch; continue; }
+        throw e;
+      }
+    }
+    if (val === NONE) continue;
+    if (typeof val === 'bigint') out += String.fromCodePoint(Number(val));
+    else if (typeof val === 'string') out += val;
+    else raiseError('TypeError', 'character mapping must return integer, None or str');
+  }
+  return out;
+});
+TYPE_STR.attrs.set('maketrans', new PyStaticMethod(new PyBuiltin('maketrans', (args) => {
+  checkArgs('maketrans', args, 1, 3);
+  const out = new PyDict();
+  if (args.length === 1) {
+    const m = unwrap(args[0]);
+    if (!(m instanceof PyDict)) {
+      raiseError('TypeError', 'if you give only one argument to maketrans it must be a dict');
+    }
+    for (const [k, v] of m.entries()) {
+      let key;
+      if (typeof k === 'bigint') key = k;
+      else if (typeof k === 'string' && cp(k).length === 1) key = BigInt(k.codePointAt(0));
+      else raiseError('TypeError', 'keys in translate table must be strings or integers');
+      out.set(key, v);
+    }
+    return out;
+  }
+  const x = args[0], y = args[1];
+  if (typeof x !== 'string' || typeof y !== 'string') {
+    raiseError('TypeError', 'first maketrans argument must be a string if there is a second argument');
+  }
+  const xc = cp(x), yc = cp(y);
+  if (xc.length !== yc.length) {
+    raiseError('ValueError', 'the first two maketrans arguments must have equal length');
+  }
+  for (let i = 0; i < xc.length; i++) {
+    out.set(BigInt(xc[i].codePointAt(0)), BigInt(yc[i].codePointAt(0)));
+  }
+  if (args.length === 3) {
+    const z = args[2];
+    if (typeof z !== 'string') raiseError('TypeError', 'third maketrans argument must be a string');
+    for (const c of cp(z)) out.set(BigInt(c.codePointAt(0)), NONE);
+  }
+  return out;
+})));
+meth(TYPE_STR, 'encode', (self, args, kwargs) => {
+  const s = asStr(self, 'encode');
+  const enc = (args.length && args[0] !== NONE ? unwrap(args[0]) : (kwargs && kwargs.has('encoding') ? unwrap(kwargs.get('encoding')) : 'utf-8')).toLowerCase().replace(/-/g, '');
+  if (enc === 'ascii') {
+    const arr = [];
+    for (const ch of s) { const c = ch.codePointAt(0); if (c > 0x7f) raiseError('UnicodeEncodeError', `'ascii' codec can't encode character`); arr.push(c); }
+    return new PyBytes(arr, false);
+  }
+  if (enc === 'latin1' || enc === 'latin1iso88591' || enc === 'iso88591') {
+    const arr = [];
+    for (const ch of s) { const c = ch.codePointAt(0); if (c > 0xff) raiseError('UnicodeEncodeError', `'latin-1' codec can't encode character`); arr.push(c); }
+    return new PyBytes(arr, false);
+  }
+  return new PyBytes([...new TextEncoder().encode(s)], false);
 });
 meth(TYPE_STR, '__len__', (self) => BigInt(cp(asStr(self, '__len__')).length));
 meth(TYPE_STR, '__getitem__', (self, args) => getItem(asStr(self, '__getitem__'), args[0]));
@@ -989,7 +1258,36 @@ function makeDictView(name, items) {
   return inst;
 }
 
+// Build a PySet from any iterable value.
+function setOf(iterable) {
+  const s = new PySet();
+  for (const x of iterToArray(iterable)) s.add(x);
+  return s;
+}
+
+// dict_keys / dict_items are set-like: support & | - ^ and set comparisons
+// against any iterable. The view's items become one operand, the other operand
+// is coerced to a set via iteration.
+function viewSetOp(op, selfItems, other) {
+  const a = setOf(new PyList(selfItems));
+  const b = setOf(other);
+  const out = new PySet();
+  if (op === '|') {
+    for (const k of a.keys()) out.add(k);
+    for (const k of b.keys()) out.add(k);
+  } else if (op === '&') {
+    for (const k of a.keys()) if (b.has(k)) out.add(k);
+  } else if (op === '-') {
+    for (const k of a.keys()) if (!b.has(k)) out.add(k);
+  } else if (op === '^') {
+    for (const k of a.keys()) if (!b.has(k)) out.add(k);
+    for (const k of b.keys()) if (!a.has(k)) out.add(k);
+  }
+  return out;
+}
+
 function makeViewType(name) {
+  const setLike = name !== 'dict_values';
   const t = new PyType(name, [TYPE_OBJECT], new Map(), { module: 'builtins' });
   t.attrs.set('__repr__', new PyBuiltin('__repr__', (self) => {
     const items = self.attrs.get('_items');
@@ -1006,6 +1304,27 @@ function makeViewType(name) {
   t.attrs.set('__len__', new PyBuiltin('__len__', (self) => BigInt(self.attrs.get('_items').items.length), true));
   t.attrs.set('__contains__', new PyBuiltin('__contains__', (self, args) =>
     self.attrs.get('_items').items.some((x) => pyEq(x, args[0])), true));
+  if (setLike) {
+    const itemsOf = (self) => self.attrs.get('_items').items;
+    const fwd = { '__and__': '&', '__or__': '|', '__sub__': '-', '__xor__': '^' };
+    for (const [dunder, op] of Object.entries(fwd)) {
+      t.attrs.set(dunder, new PyBuiltin(dunder, (self, args) =>
+        viewSetOp(op, itemsOf(self), args[0]), true));
+    }
+    // Reflected: other <op> view. Commutative ops mirror; '-' swaps operands.
+    const refl = { '__rand__': '&', '__ror__': '|', '__rxor__': '^' };
+    for (const [dunder, op] of Object.entries(refl)) {
+      t.attrs.set(dunder, new PyBuiltin(dunder, (self, args) =>
+        viewSetOp(op, itemsOf(self), args[0]), true));
+    }
+    t.attrs.set('__rsub__', new PyBuiltin('__rsub__', (self, args) => {
+      const a = setOf(args[0]);
+      const b = setOf(new PyList(itemsOf(self)));
+      const out = new PySet();
+      for (const k of a.keys()) if (!b.has(k)) out.add(k);
+      return out;
+    }, true));
+  }
   return t;
 }
 
@@ -1206,6 +1525,33 @@ meth(TYPE_INT, 'bit_count', (self) => {
   for (const ch of v.toString(2)) if (ch === '1') count++;
   return BigInt(count);
 });
+meth(TYPE_INT, 'to_bytes', (self, args, kwargs) => {
+  let v = numToBigInt(self);
+  const length = args.length > 0 && args[0] !== NONE ? Number(numToBigInt(args[0])) : (kwargs && kwargs.has('length') ? Number(numToBigInt(kwargs.get('length'))) : 1);
+  const order = args.length > 1 && args[1] !== NONE ? unwrap(args[1]) : (kwargs && kwargs.has('byteorder') ? unwrap(kwargs.get('byteorder')) : 'big');
+  const signed = kwargs && kwargs.has('signed') ? pyTruthy(kwargs.get('signed')) : false;
+  if (v < 0n) {
+    if (!signed) raiseError('OverflowError', "can't convert negative int to unsigned");
+    v = (1n << BigInt(length * 8)) + v;
+  }
+  const out = [];
+  let t = v;
+  for (let i = 0; i < length; i++) { out.push(Number(t & 0xffn)); t >>= 8n; }
+  if (t !== 0n) raiseError('OverflowError', 'int too big to convert');
+  if (order === 'big') out.reverse();
+  return new PyBytes(out, false);
+});
+classMeth(TYPE_INT, 'from_bytes', (cls, args, kwargs) => {
+  const src = unwrap(args[0]);
+  const bytes = src instanceof PyBytes ? src.bytes : iterToArray(args[0]).map((x) => Number(numToBigInt(x)));
+  const order = args.length > 1 && args[1] !== NONE ? unwrap(args[1]) : (kwargs && kwargs.has('byteorder') ? unwrap(kwargs.get('byteorder')) : 'big');
+  const signed = kwargs && kwargs.has('signed') ? pyTruthy(kwargs.get('signed')) : false;
+  const ordered = order === 'big' ? bytes : [...bytes].reverse();
+  let v = 0n;
+  for (const b of ordered) v = (v << 8n) | BigInt(b);
+  if (signed && ordered.length && (ordered[0] & 0x80)) v -= (1n << BigInt(ordered.length * 8));
+  return v;
+});
 TYPE_INT.attrs.set('real', new PyProperty(new PyBuiltin('real', (self) => numToBigInt(unwrap(self)), true)));
 TYPE_INT.attrs.set('imag', new PyProperty(new PyBuiltin('imag', () => 0n, true)));
 TYPE_INT.attrs.set('numerator', new PyProperty(new PyBuiltin('numerator', (self) => numToBigInt(unwrap(self)), true)));
@@ -1288,7 +1634,11 @@ meth(TYPE_OBJECT, '__setattr__', (self, args) => {
   self.attrs.set(args[0], args[1]);
   return NONE;
 });
-meth(TYPE_OBJECT, '__getattribute__', (self, args) => getAttr(self, args[0]));
+// Default attribute lookup. Use the override-free path for instances so an
+// explicit object.__getattribute__(self, name) from a user __getattribute__
+// does not recurse back into that override.
+meth(TYPE_OBJECT, '__getattribute__', (self, args) =>
+  (self instanceof PyInstance ? defaultInstanceGetAttr(self, args[0]) : getAttr(self, args[0])));
 
 meth(EXC.BaseException, '__init__', (self, args) => {
   self.attrs.set('args', new PyTuple([...args]));
@@ -1388,6 +1738,7 @@ bi('abs', (args) => {
   if (typeof uv === 'bigint') return uv < 0n ? -uv : uv;
   if (typeof uv === 'boolean') return uv ? 1n : 0n;
   if (typeof uv === 'number') return Math.abs(uv);
+  if (uv instanceof PyComplex) return Math.hypot(uv.re, uv.im);
   raiseError('TypeError', `bad operand type for abs(): '${typeOf(v).name}'`);
 });
 bi('min', (args, kwargs) => minMax(args, kwargs, 'min', '<'));
@@ -1419,7 +1770,29 @@ bi('sum', (args, kwargs) => {
   checkArgs('sum', args, 1, 2);
   let acc = args.length === 2 ? args[1] : (kw.start !== undefined ? kw.start : 0n);
   if (typeof unwrap(acc) === 'string') raiseError('TypeError', "sum() can't sum strings [use ''.join(seq) instead]");
-  for (const x of iterToArray(args[0])) {
+  const items = iterToArray(args[0]);
+  // Plain-number fast paths matching CPython: exact BigInt sum for all-ints,
+  // and Neumaier compensated summation when any float is involved (so e.g.
+  // sum([0.1, 0.2, 0.3]) == 0.6). Custom __add__ objects use the generic path.
+  const isPlainNum = (v) => typeof v === 'bigint' || typeof v === 'boolean' || typeof v === 'number';
+  if (isPlainNum(acc) && items.every(isPlainNum)) {
+    const hasFloat = typeof acc === 'number' || items.some((v) => typeof v === 'number');
+    if (!hasFloat) {
+      let s = typeof acc === 'boolean' ? (acc ? 1n : 0n) : acc;
+      for (const x of items) s += typeof x === 'boolean' ? (x ? 1n : 0n) : x;
+      return s;
+    }
+    const f = (v) => (typeof v === 'boolean' ? (v ? 1 : 0) : Number(v));
+    let s = f(acc), c = 0;
+    for (const x of items) {
+      const xi = f(x);
+      const t = s + xi;
+      c += Math.abs(s) >= Math.abs(xi) ? (s - t) + xi : (xi - t) + s;
+      s = t;
+    }
+    return s + c;
+  }
+  for (const x of items) {
     acc = binOp('+', acc, x);
   }
   return acc;
@@ -1772,8 +2145,9 @@ function makeSystemExit(args) {
 
 // Types & constants in the builtins namespace.
 for (const t of [
-  TYPE_OBJECT, TYPE_TYPE, TYPE_INT, TYPE_BOOL, TYPE_FLOAT, TYPE_STR, TYPE_LIST,
+  TYPE_OBJECT, TYPE_TYPE, TYPE_INT, TYPE_BOOL, TYPE_FLOAT, TYPE_COMPLEX, TYPE_STR, TYPE_LIST,
   TYPE_TUPLE, TYPE_DICT, TYPE_SET, TYPE_FROZENSET, TYPE_RANGE, TYPE_SLICE,
+  TYPE_BYTES, TYPE_BYTEARRAY,
   TYPE_PROPERTY, TYPE_CLASSMETHOD, TYPE_STATICMETHOD,
 ]) {
   BUILTINS.set(t.name, t);
