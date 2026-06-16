@@ -85,6 +85,6 @@ python.js        CLI エントリ。ファイル実行・traceback 整形・stdi
 ## テスト
 
 `tests/cases/*.py` の各ファイルを CPython（`python3`）と v8python の両方で実行し、
-標準出力と例外型を比較しています（104 ケースが完全一致）。新しいテストを書く際は
+標準出力と例外型を比較しています（136 ケースが完全一致）。新しいテストを書く際は
 [tests/GUIDELINES.md](tests/GUIDELINES.md) の制約（set の出力順、random の値比較禁止
 など）を参照してください。

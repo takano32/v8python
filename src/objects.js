@@ -71,6 +71,7 @@ export class PyType {
     this.bases = bases;
     this.attrs = attrs;
     this.builtin = !!opts.builtin;
+    this.metatype = opts.metatype || null; // custom metaclass, if any
     this.module = opts.module || 'builtins';
     this.construct = opts.construct || null;       // builtin constructor
     this.payloadFactory = opts.payloadFactory || null; // for subclassing builtins
@@ -104,6 +105,25 @@ export class PyStaticMethod { constructor(func) { this.func = func; } }
 
 export class PySuper {
   constructor(startType, obj) { this.startType = startType; this.obj = obj; }
+}
+
+// Python complex number (real/imag are JS doubles).
+export class PyComplex {
+  constructor(re, im) { this.re = re; this.im = im; }
+}
+
+// Coroutine object returned by calling an `async def` function. Execution is
+// deferred until it is awaited or driven by asyncio.run (synchronous model).
+export class PyCoroutine {
+  constructor(fnObj, args, kwargs) {
+    this.fnObj = fnObj; this.args = args; this.kwargs = kwargs;
+    this.done = false; this.nativeResult = undefined; this.name = fnObj ? fnObj.name : 'coro';
+  }
+}
+
+// Python bytes / bytearray. `bytes` is a JS array of integers 0..255.
+export class PyBytes {
+  constructor(bytes, mutable = false) { this.bytes = bytes; this.mutable = mutable; }
 }
 
 // Generic JS-backed iterator (result of iter(), enumerate(), zip(), map(), ...)
@@ -273,6 +293,10 @@ export const TYPE_TYPE = bt('type', [TYPE_OBJECT]);
 export const TYPE_INT = bt('int', [TYPE_OBJECT]);
 export const TYPE_BOOL = bt('bool', [TYPE_INT]);
 export const TYPE_FLOAT = bt('float', [TYPE_OBJECT]);
+export const TYPE_COMPLEX = bt('complex', [TYPE_OBJECT]);
+export const TYPE_COROUTINE = bt('coroutine', [TYPE_OBJECT]);
+export const TYPE_BYTES = bt('bytes', [TYPE_OBJECT]);
+export const TYPE_BYTEARRAY = bt('bytearray', [TYPE_OBJECT]);
 export const TYPE_STR = bt('str', [TYPE_OBJECT]);
 export const TYPE_LIST = bt('list', [TYPE_OBJECT], { payloadFactory: () => new PyList([]) });
 export const TYPE_TUPLE = bt('tuple', [TYPE_OBJECT], { payloadFactory: () => new PyTuple([]) });
@@ -386,7 +410,7 @@ export function typeOf(v) {
   if (v instanceof PySet) return v.frozen ? TYPE_FROZENSET : TYPE_SET;
   if (v instanceof PyRange) return TYPE_RANGE;
   if (v instanceof PySlice) return TYPE_SLICE;
-  if (v instanceof PyType) return TYPE_TYPE;
+  if (v instanceof PyType) return v.metatype || TYPE_TYPE;
   if (v instanceof PyFunction) return TYPE_FUNCTION;
   if (v instanceof PyBuiltin) return TYPE_BUILTIN;
   if (v instanceof PyBoundMethod) return TYPE_METHOD;
@@ -396,9 +420,25 @@ export function typeOf(v) {
   if (v instanceof PyClassMethod) return TYPE_CLASSMETHOD;
   if (v instanceof PyStaticMethod) return TYPE_STATICMETHOD;
   if (v instanceof PySuper) return TYPE_SUPER;
-  if (v instanceof PyIterator) return TYPE_ITERATOR;
+  if (v instanceof PyIterator) return iterTypeFor(v.typeName);
+  if (v instanceof PyComplex) return TYPE_COMPLEX;
+  if (v instanceof PyCoroutine) return TYPE_COROUTINE;
+  if (v instanceof PyBytes) return v.mutable ? TYPE_BYTEARRAY : TYPE_BYTES;
   if (v instanceof PyFile) return TYPE_FILE;
   throw new Error(`internal: typeOf unknown value ${String(v)}`);
+}
+
+// Distinct iterator subtypes per kind (enumerate, zip, map, filter, ...) so
+// type(it).__name__ matches CPython. All inherit iterator's __next__/__iter__.
+const ITER_TYPE_CACHE = new Map();
+function iterTypeFor(name) {
+  if (!name || name === 'iterator') return TYPE_ITERATOR;
+  let t = ITER_TYPE_CACHE.get(name);
+  if (!t) {
+    t = new PyType(name, [TYPE_ITERATOR], new Map(), { builtin: true });
+    ITER_TYPE_CACHE.set(name, t);
+  }
+  return t;
 }
 
 export function isSubclassOf(a, b) {
@@ -442,6 +482,11 @@ export function hashKey(v) {
   }
   if (v === NONE) return 'n';
   if (v === PY_ELLIPSIS) return 'e';
+  if (v instanceof PyComplex) return 'c:' + v.re + ',' + v.im;
+  if (v instanceof PyBytes) {
+    if (v.mutable) raiseError('TypeError', "unhashable type: 'bytearray'");
+    return 'b:' + v.bytes.join(',');
+  }
   if (v instanceof PyTuple) {
     return 't:' + JSON.stringify(v.items.map(hashKey));
   }
@@ -699,6 +744,8 @@ export function pyTruthy(v) {
   if (v instanceof PyList || v instanceof PyTuple) return v.items.length > 0;
   if (v instanceof PyDict || v instanceof PySet) return v.size > 0;
   if (v instanceof PyRange) return v.length() > 0n;
+  if (v instanceof PyBytes) return v.bytes.length > 0;
+  if (v instanceof PyComplex) return v.re !== 0 || v.im !== 0;
   if (v instanceof PyInstance) {
     const boolHit = userDunder(v, '__bool__');
     if (boolHit) {
@@ -797,6 +844,10 @@ export function pyEq(a, b) {
   }
   if (isNum(a) && isNum(b)) return cmpNum(a, b) === 0;
   if (typeof a === 'string' && typeof b === 'string') return a === b;
+  if (a instanceof PyComplex || b instanceof PyComplex) {
+    const ca = toComplexParts(a), cb = toComplexParts(b);
+    return ca && cb ? (ca.re === cb.re && ca.im === cb.im) : false;
+  }
 
   // User-defined __eq__ takes priority.
   if (a instanceof PyInstance || b instanceof PyInstance) {
@@ -853,6 +904,11 @@ function pyEqNative(a, b) {
     if (la === 1n) return true;
     return a.step === b.step;
   }
+  if (a instanceof PyBytes && b instanceof PyBytes) {
+    if (a.bytes.length !== b.bytes.length) return false;
+    for (let i = 0; i < a.bytes.length; i++) if (a.bytes[i] !== b.bytes[i]) return false;
+    return true;
+  }
   return a === b;
 }
 
@@ -896,6 +952,21 @@ export function richCompare(op, a, b) {
       case '<=': return ua <= ub;
       case '>': return ua > ub;
       case '>=': return ua >= ub;
+    }
+  }
+  if (ua instanceof PyBytes && ub instanceof PyBytes) {
+    const x = ua.bytes, y = ub.bytes;
+    const n = Math.min(x.length, y.length);
+    for (let i = 0; i < n; i++) {
+      if (x[i] !== y[i]) {
+        switch (op) { case '<': return x[i] < y[i]; case '<=': return x[i] < y[i]; case '>': return x[i] > y[i]; case '>=': return x[i] > y[i]; }
+      }
+    }
+    switch (op) {
+      case '<': return x.length < y.length;
+      case '<=': return x.length <= y.length;
+      case '>': return x.length > y.length;
+      case '>=': return x.length >= y.length;
     }
   }
   if ((ua instanceof PyList && ub instanceof PyList) ||
@@ -945,30 +1016,72 @@ function bindClassAttr(value, inst) {
   return value;
 }
 
+// User-defined descriptor protocol: a class attribute whose own type defines
+// __get__ (non-data) and optionally __set__/__delete__ (data descriptor).
+function isDataDescriptor(v) {
+  return v instanceof PyInstance && userDunder(v, '__get__') !== null &&
+    (userDunder(v, '__set__') !== null || userDunder(v, '__delete__') !== null);
+}
+function callDescGet(desc, inst) {
+  const h = userDunder(desc, '__get__');
+  return pyCall(bindClassAttr(h.value, desc), [inst, typeOf(inst)]);
+}
+
+// The default attribute lookup for instances (object.__getattribute__):
+// data descriptors, then the instance dict, then class attrs / non-data
+// descriptors, then __getattr__.
+export function defaultInstanceGetAttr(obj, name) {
+  const hit = mroLookup(obj.cls, name);
+  if (hit && hit.value instanceof PyProperty) {
+    if (hit.value.fget === NONE) {
+      raiseError('AttributeError', `property '${name}' of '${obj.cls.name}' object has no getter`);
+    }
+    return pyCall(hit.value.fget, [obj]);
+  }
+  if (hit && isDataDescriptor(hit.value)) return callDescGet(hit.value, obj);
+  if (obj.attrs.has(name)) return obj.attrs.get(name);
+  if (name === '__dict__') {
+    const d = new PyDict();
+    for (const [k, v] of obj.attrs) d.set(k, v);
+    return d;
+  }
+  if (hit) {
+    if (hit.value instanceof PyInstance && userDunder(hit.value, '__get__')) {
+      return callDescGet(hit.value, obj);
+    }
+    return bindClassAttr(hit.value, obj);
+  }
+  const ga = mroLookup(obj.cls, '__getattr__');
+  if (ga && !ga.owner.builtin) {
+    return pyCall(bindClassAttr(ga.value, obj), [name]);
+  }
+  raiseError('AttributeError', `'${obj.cls.name}' object has no attribute '${name}'`);
+}
+
+// object.__init_subclass__: implicit no-op classmethod so super() chains resolve.
+// (object.__getattribute__ is registered in builtins.js.)
+TYPE_OBJECT.attrs.set('__init_subclass__',
+  new PyClassMethod(new PyBuiltin('__init_subclass__', () => NONE, true)));
+
 export function getAttr(obj, name) {
   if (name === '__class__') return typeOf(obj);
 
   if (obj instanceof PyInstance) {
-    // Data descriptors (properties) take priority over the instance dict.
-    const hit = mroLookup(obj.cls, name);
-    if (hit && hit.value instanceof PyProperty) {
-      if (hit.value.fget === NONE) {
-        raiseError('AttributeError', `property '${name}' of '${obj.cls.name}' object has no getter`);
+    // __getattribute__ override intercepts every attribute access; on
+    // AttributeError, __getattr__ still gets a chance (as in CPython).
+    const gattr = userDunder(obj, '__getattribute__');
+    if (gattr) {
+      try {
+        return pyCall(bindClassAttr(gattr.value, obj), [name]);
+      } catch (e) {
+        if (e instanceof PyError && isInstanceOf(e.pyExc, EXC.AttributeError)) {
+          const gf = userDunder(obj, '__getattr__');
+          if (gf) return pyCall(bindClassAttr(gf.value, obj), [name]);
+        }
+        throw e;
       }
-      return pyCall(hit.value.fget, [obj]);
     }
-    if (obj.attrs.has(name)) return obj.attrs.get(name);
-    if (name === '__dict__') {
-      const d = new PyDict();
-      for (const [k, v] of obj.attrs) d.set(k, v);
-      return d;
-    }
-    if (hit) return bindClassAttr(hit.value, obj);
-    const ga = mroLookup(obj.cls, '__getattr__');
-    if (ga && !ga.owner.builtin) {
-      return pyCall(bindClassAttr(ga.value, obj), [name]);
-    }
-    raiseError('AttributeError', `'${obj.cls.name}' object has no attribute '${name}'`);
+    return defaultInstanceGetAttr(obj, name);
   }
 
   if (obj instanceof PyType) {
@@ -991,6 +1104,17 @@ export function getAttr(obj, name) {
       if (v instanceof PyClassMethod) return new PyBoundMethod(v.func, obj);
       if (v instanceof PyStaticMethod) return v.func;
       return v;
+    }
+    // Fall back to the metaclass (methods defined on a custom metaclass).
+    if (obj.metatype) {
+      const mhit = mroLookup(obj.metatype, name);
+      if (mhit && mhit.owner !== TYPE_OBJECT) {
+        const mv = mhit.value;
+        if (mv instanceof PyClassMethod) return new PyBoundMethod(mv.func, obj.metatype);
+        if (mv instanceof PyStaticMethod) return mv.func;
+        if (mv instanceof PyProperty) return pyCall(mv.fget, [obj]);
+        return bindClassAttr(mv, obj);
+      }
     }
     raiseError('AttributeError', `type object '${obj.name}' has no attribute '${name}'`);
   }
@@ -1079,6 +1203,22 @@ export function getAttr(obj, name) {
   raiseError('AttributeError', `'${t.name}' object has no attribute '${name}'`);
 }
 
+// __slots__ enforcement: returns false if `name` may not be set as an instance
+// attribute (every user class in the MRO defines __slots__ without the name).
+function slotsAllow(cls, name) {
+  let restricted = false;
+  for (const t of cls.mro) {
+    if (t === TYPE_OBJECT || t.builtin) continue;
+    if (t._slots) {
+      restricted = true;
+      if (t._slots.has(name) || t._slots.has('__dict__')) return true;
+    } else {
+      return true; // a non-slots user class provides __dict__
+    }
+  }
+  return !restricted;
+}
+
 export function setAttr(obj, name, value) {
   if (obj instanceof PyInstance) {
     const hit = mroLookup(obj.cls, name);
@@ -1089,10 +1229,21 @@ export function setAttr(obj, name, value) {
       pyCall(hit.value.fset, [obj, value]);
       return;
     }
+    // Data descriptor with __set__ intercepts assignment.
+    if (hit && hit.value instanceof PyInstance) {
+      const setHit = userDunder(hit.value, '__set__');
+      if (setHit) {
+        pyCall(bindClassAttr(setHit.value, hit.value), [obj, value]);
+        return;
+      }
+    }
     const sa = mroLookup(obj.cls, '__setattr__');
     if (sa && !sa.owner.builtin) {
       pyCall(bindClassAttr(sa.value, obj), [name, value]);
       return;
+    }
+    if (!slotsAllow(obj.cls, name)) {
+      raiseError('AttributeError', `'${obj.cls.name}' object has no attribute '${name}'`);
     }
     obj.attrs.set(name, value);
     return;
@@ -1105,7 +1256,18 @@ export function setAttr(obj, name, value) {
     return;
   }
   if (obj instanceof PyModule) { obj.attrs.set(name, value); return; }
-  if (obj instanceof PyFunction) { obj.attrs.set(name, value); return; }
+  if (obj instanceof PyFunction) {
+    // __name__/__qualname__/__doc__ are stored on the function directly so that
+    // getAttr (which reads obj.name/obj.doc) reflects updates, e.g. functools.wraps.
+    if (name === '__name__' || name === '__qualname__') {
+      if (typeof value !== 'string') raiseError('TypeError', `__name__ must be set to a string object`);
+      obj.name = value;
+      return;
+    }
+    if (name === '__doc__') { obj.doc = value; return; }
+    obj.attrs.set(name, value);
+    return;
+  }
   raiseError('AttributeError', `'${typeOf(obj).name}' object has no attribute '${name}'`);
 }
 
@@ -1159,6 +1321,11 @@ export function pyIter(v) {
     let i = 0;
     return { next: () => (i < chars.length ? chars[i++] : DONE) };
   }
+  if (uv instanceof PyBytes) {
+    const arr = uv.bytes;
+    let i = 0;
+    return { next: () => (i < arr.length ? BigInt(arr[i++]) : DONE) };
+  }
   if (uv instanceof PyDict) {
     const keys = uv.keysArray();
     let i = 0;
@@ -1189,6 +1356,11 @@ export function pyIter(v) {
   }
   if (uv instanceof PyFile) {
     return { next: () => fileReadLineOrDone(uv) };
+  }
+  if (uv instanceof PyType && uv._enumList) {
+    const list = uv._enumList;
+    let i = 0;
+    return { next: () => (i < list.length ? list[i++] : DONE) };
   }
   if (v instanceof PyInstance) {
     const iterHit = userDunder(v, '__iter__');
@@ -1270,6 +1442,8 @@ export function pyRepr(v) {
   if (v === NONE) return 'None';
   if (v === NOT_IMPLEMENTED) return 'NotImplemented';
   if (v === PY_ELLIPSIS) return 'Ellipsis';
+  if (v instanceof PyComplex) return complexRepr(v);
+  if (v instanceof PyBytes) return v.mutable ? `bytearray(${bytesRepr(v.bytes)})` : bytesRepr(v.bytes);
 
   if (v instanceof PyInstance) {
     const hit = userDunder(v, '__repr__');
@@ -1375,6 +1549,10 @@ export function pyStr(v) {
     }
     if (isSubclassOf(v.cls, EXC.BaseException)) {
       const args = v.attrs.get('args') || new PyTuple([]);
+      // KeyError.__str__ reprs its single argument (so str matches the key's repr).
+      if (isSubclassOf(v.cls, EXC.KeyError) && args.items.length === 1) {
+        return pyRepr(args.items[0]);
+      }
       if (args.items.length === 0) return '';
       if (args.items.length === 1) return pyStr(args.items[0]);
       return pyRepr(args);
@@ -1830,6 +2008,13 @@ export function getItem(obj, index) {
     const i = normIndex(index, chars.length, 'string');
     return chars[i];
   }
+  if (o instanceof PyBytes) {
+    if (index instanceof PySlice) {
+      return new PyBytes(sliceIndices(index, o.bytes.length).map((i) => o.bytes[i]), o.mutable);
+    }
+    const i = normIndex(index, o.bytes.length, o.mutable ? 'bytearray' : 'bytes');
+    return BigInt(o.bytes[i]);
+  }
   if (o instanceof PyDict) {
     const e = o.getEntry(index);
     if (e === undefined) {
@@ -1865,6 +2050,12 @@ export function getItem(obj, index) {
     return o.item(i);
   }
   if (o instanceof PyType) {
+    // Enum subscription: Color['NAME'] -> member.
+    if (o._enumMembers && typeof index === 'string') {
+      const m = o._enumMembers.get(index);
+      if (m) return m;
+      throw new PyError(keyErrorExc(index));
+    }
     // Generic alias (list[int] etc): return the type itself, tolerantly.
     return o;
   }
@@ -1921,6 +2112,16 @@ export function setItem(obj, index, value) {
     arr[i] = value;
     return;
   }
+  if (o instanceof PyBytes) {
+    if (!o.mutable) raiseError('TypeError', "'bytes' object does not support item assignment");
+    let i = Number(numToBigInt(index));
+    if (i < 0) i += o.bytes.length;
+    if (i < 0 || i >= o.bytes.length) raiseError('IndexError', 'bytearray index out of range');
+    const n = Number(numToBigInt(value));
+    if (n < 0 || n > 255) raiseError('ValueError', 'byte must be in range(0, 256)');
+    o.bytes[i] = n;
+    return;
+  }
   if (o instanceof PyDict) {
     o.set(index, value);
     return;
@@ -1975,6 +2176,18 @@ export function pyContains(item, container) {
   if (c instanceof PyList || c instanceof PyTuple) {
     return c.items.some((x) => pyEq(x, item));
   }
+  if (c instanceof PyBytes) {
+    const u = unwrap(item);
+    if (u instanceof PyBytes) {
+      const sub = u.bytes, arr = c.bytes;
+      if (!sub.length) return true;
+      for (let i = 0; i + sub.length <= arr.length; i++) if (sub.every((b, j) => arr[i + j] === b)) return true;
+      return false;
+    }
+    if (typeof u === 'bigint' || typeof u === 'boolean') return c.bytes.includes(Number(numToBigInt(u)));
+    raiseError('TypeError', 'a bytes-like object is required');
+  }
+  if (c instanceof PyType && c._enumList) return c._enumList.includes(item);
   if (c instanceof PyDict) return c.has(item);
   if (c instanceof PySet) return c.has(item);
   if (c instanceof PyRange) {
@@ -2040,6 +2253,12 @@ export function binOp(op, a, b) {
 }
 
 function binOpNative(op, a, b) {
+  // complex (either operand)
+  if (a instanceof PyComplex || b instanceof PyComplex) {
+    const ca = toComplexParts(a), cb = toComplexParts(b);
+    if (ca && cb) return complexBinOp(op, ca, cb);
+    return NOT_IMPLEMENTED;
+  }
   // numeric
   if (isNum(a) && isNum(b)) return numBinOp(op, normNum(a), normNum(b));
 
@@ -2079,6 +2298,16 @@ function binOpNative(op, a, b) {
     return NOT_IMPLEMENTED;
   }
   if (b instanceof PyTuple && op === '*') return new PyTuple(seqRepeat(b.items, a, 'tuple'));
+
+  if (a instanceof PyBytes) {
+    if (op === '+') {
+      if (!(b instanceof PyBytes)) raiseError('TypeError', `can't concat ${typeOf(b).name} to ${typeOf(a).name}`);
+      return new PyBytes([...a.bytes, ...b.bytes], a.mutable);
+    }
+    if (op === '*') return new PyBytes(seqRepeat(a.bytes, b, 'bytes'), a.mutable);
+    return NOT_IMPLEMENTED;
+  }
+  if (b instanceof PyBytes && op === '*') return new PyBytes(seqRepeat(b.bytes, a, 'bytes'), b.mutable);
 
   if (a instanceof PyDict && b instanceof PyDict && op === '|') {
     const d = a.copy();
@@ -2135,6 +2364,77 @@ function seqRepeat(items, n, what) {
   return out;
 }
 
+// bytes/bytearray repr: printable ASCII as-is, others as \xNN.
+export function bytesRepr(arr) {
+  const hasSingle = arr.includes(0x27);
+  const hasDouble = arr.includes(0x22);
+  const quote = (hasSingle && !hasDouble) ? '"' : "'";
+  const qc = quote.charCodeAt(0);
+  let out = 'b' + quote;
+  for (const b of arr) {
+    if (b === 0x5c) out += '\\\\';
+    else if (b === qc) out += '\\' + quote;
+    else if (b === 0x09) out += '\\t';
+    else if (b === 0x0a) out += '\\n';
+    else if (b === 0x0d) out += '\\r';
+    else if (b >= 0x20 && b < 0x7f) out += String.fromCharCode(b);
+    else out += '\\x' + b.toString(16).padStart(2, '0');
+  }
+  return out + quote;
+}
+
+// Format one complex component like CPython (drops trailing .0 for integers).
+function cpart(x) {
+  if (!Number.isFinite(x)) return floatRepr(x);
+  if (Number.isInteger(x) && Math.abs(x) < 1e16) return (Object.is(x, -0) ? '-0' : String(x));
+  return floatRepr(x);
+}
+function complexRepr(v) {
+  if (v.re === 0 && !Object.is(v.re, -0)) return `${cpart(v.im)}j`;
+  const imSign = (v.im < 0 || Object.is(v.im, -0)) ? '-' : '+';
+  return `(${cpart(v.re)}${imSign}${cpart(Math.abs(v.im))}j)`;
+}
+
+// Coerce a real/complex JS value to {re, im}, or null if not numeric.
+export function toComplexParts(v) {
+  if (v instanceof PyComplex) return { re: v.re, im: v.im };
+  if (typeof v === 'bigint') return { re: Number(v), im: 0 };
+  if (typeof v === 'boolean') return { re: v ? 1 : 0, im: 0 };
+  if (typeof v === 'number') return { re: v, im: 0 };
+  return null;
+}
+
+function complexBinOp(op, a, b) {
+  switch (op) {
+    case '+': return new PyComplex(a.re + b.re, a.im + b.im);
+    case '-': return new PyComplex(a.re - b.re, a.im - b.im);
+    case '*': return new PyComplex(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re);
+    case '/': {
+      const d = b.re * b.re + b.im * b.im;
+      if (d === 0) raiseError('ZeroDivisionError', 'complex division by zero');
+      return new PyComplex((a.re * b.re + a.im * b.im) / d, (a.im * b.re - a.re * b.im) / d);
+    }
+    case '**': {
+      if (b.im === 0 && Number.isInteger(b.re) && Math.abs(b.re) <= 100) {
+        let n = b.re; let result = new PyComplex(1, 0); let base = a;
+        const neg = n < 0; n = Math.abs(n);
+        for (let i = 0; i < n; i++) result = complexBinOp('*', result, base);
+        if (neg) return complexBinOp('/', new PyComplex(1, 0), result);
+        return result;
+      }
+      // general: exp(b * log(a))
+      const r = Math.hypot(a.re, a.im); const theta = Math.atan2(a.im, a.re);
+      if (r === 0) { if (b.re === 0 && b.im === 0) return new PyComplex(1, 0); raiseError('ZeroDivisionError', '0.0 to a negative or complex power'); }
+      const logr = Math.log(r);
+      const re = b.re * logr - b.im * theta;
+      const im = b.re * theta + b.im * logr;
+      const ex = Math.exp(re);
+      return new PyComplex(ex * Math.cos(im), ex * Math.sin(im));
+    }
+  }
+  return NOT_IMPLEMENTED;
+}
+
 export function numBinOp(op, a, b) {
   const bothInt = typeof a === 'bigint' && typeof b === 'bigint';
   switch (op) {
@@ -2185,7 +2485,10 @@ export function numBinOp(op, a, b) {
       const fa = asF(a), fb = asF(b);
       if (fa === 0 && fb < 0) raiseError('ZeroDivisionError', '0.0 cannot be raised to a negative power');
       if (fa < 0 && !Number.isInteger(fb)) {
-        raiseError('ValueError', 'negative number cannot be raised to a fractional power');
+        // CPython yields a complex result here.
+        const r = Math.pow(-fa, fb);
+        const theta = Math.PI * fb;
+        return new PyComplex(r * Math.cos(theta), r * Math.sin(theta));
       }
       return Math.pow(fa, fb);
     }
@@ -2242,6 +2545,10 @@ export function unaryOp(op, v) {
     if (hit) return pyCall(hit.value, [v]);
   }
   const uv = unwrap(v);
+  if (uv instanceof PyComplex) {
+    if (op === '-') return new PyComplex(-uv.re, -uv.im);
+    if (op === '+') return uv;
+  }
   switch (op) {
     case '-':
       if (typeof uv === 'bigint') return -uv;
@@ -2277,6 +2584,8 @@ export function pyLen(v) {
   if (uv instanceof PyList || uv instanceof PyTuple) return BigInt(uv.items.length);
   if (uv instanceof PyDict || uv instanceof PySet) return BigInt(uv.size);
   if (uv instanceof PyRange) return uv.length();
+  if (uv instanceof PyBytes) return BigInt(uv.bytes.length);
+  if (uv instanceof PyType && uv._enumList) return BigInt(uv._enumList.length);
   raiseError('TypeError', `object of type '${typeOf(v).name}' has no len()`);
 }
 

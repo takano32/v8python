@@ -10,8 +10,10 @@ import {
   NONE, NOT_IMPLEMENTED, PY_ELLIPSIS, DONE,
   PyList, PyTuple, PyDict, PySet, PyRange, PySlice, PyFunction, PyBuiltin,
   PyBoundMethod, PyType, PyInstance, PyModule, PyProperty, PyClassMethod,
-  PyStaticMethod, PySuper, PyIterator, PyGenerator, PyError,
-  TYPE_OBJECT, TYPE_TYPE, EXC, makeExc, raiseError, isExceptionType,
+  PyStaticMethod, PySuper, PyIterator, PyGenerator, PyError, PyComplex, PyBytes, PyCoroutine,
+  TYPE_OBJECT, TYPE_TYPE, TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_BOOL,
+  TYPE_BYTES, TYPE_BYTEARRAY, TYPE_LIST, TYPE_TUPLE, TYPE_DICT, TYPE_SET, TYPE_FROZENSET,
+  EXC, makeExc, raiseError, isExceptionType,
   typeOf, isInstanceOf, isSubclassOf, unwrap, setCallHook,
   pyEq, richCompare, pyTruthy, getAttr, setAttr, delAttr,
   pyIter, iterToArray, pyRepr, pyStr, pyFormat, pyContains,
@@ -187,6 +189,19 @@ export function* callValue(callable, args, kwargs) {
 }
 
 function* instantiate(cls, args, kwargs) {
+  // Calling a metaclass (a subclass of `type`) produces a class, not an instance.
+  if (cls !== TYPE_TYPE && cls.mro.includes(TYPE_TYPE)) {
+    const newHit = mroLookup(cls, '__new__');
+    const result = yield* callValue(newHit.value, [cls, ...args], kwargs);
+    if (result instanceof PyType) {
+      if (!result.metatype) result.metatype = cls;
+      const initHit = mroLookup(cls, '__init__');
+      if (initHit && initHit.owner !== TYPE_OBJECT && initHit.owner !== TYPE_TYPE) {
+        yield* callValue(bindClassAttr(initHit.value, result), args, kwargs);
+      }
+    }
+    return result;
+  }
   if (cls.construct) {
     return cls.construct(args, kwargs);
   }
@@ -282,7 +297,11 @@ function fillDefaultsOrThrow(scope, params, fnObj, fname, kind) {
   }
 }
 
-export function* callFunction(fnObj, args, kwargs) {
+export function* callFunction(fnObj, args, kwargs, forceRun) {
+  // An async function returns a coroutine; the body runs only when awaited/run.
+  if (fnObj.isAsync && !forceRun) {
+    return new PyCoroutine(fnObj, args, kwargs);
+  }
   if (FRAMES.length >= RECURSION_LIMIT) {
     raiseError('RecursionError', 'maximum recursion depth exceeded');
   }
@@ -399,6 +418,17 @@ function* execStmt(node, scope, frame) {
       return yield* execBlock(node.orelse, scope, frame);
     }
 
+    case 'Match': {
+      const subject = yield* evalExpr(node.subject, scope, frame);
+      for (const c of node.cases) {
+        if (yield* matchPattern(c.pattern, subject, scope, frame)) {
+          if (c.guard && !pyTruthy(yield* evalExpr(c.guard, scope, frame))) continue;
+          return yield* execBlock(c.body, scope, frame);
+        }
+      }
+      return undefined;
+    }
+
     case 'While': {
       for (;;) {
         frame.line = node.line;
@@ -416,6 +446,26 @@ function* execStmt(node, scope, frame) {
 
     case 'For': {
       const iterable = yield* evalExpr(node.iter, scope, frame);
+      if (node.isAsync) {
+        const aiter = yield* callValue(getAttr(iterable, '__aiter__'), [], null);
+        for (;;) {
+          let v;
+          try {
+            v = yield* awaitValue(yield* callValue(getAttr(aiter, '__anext__'), [], null));
+          } catch (e) {
+            if (e instanceof PyError && isInstanceOf(e.pyExc, EXC.StopAsyncIteration)) break;
+            throw e;
+          }
+          yield* assignTarget(node.target, v, scope, frame);
+          const sig = yield* execBlock(node.body, scope, frame);
+          if (sig) {
+            if (sig.type === 'break') return undefined;
+            if (sig.type === 'continue') continue;
+            return sig;
+          }
+        }
+        return yield* execBlock(node.orelse, scope, frame);
+      }
       const it = pyIter(iterable);
       for (;;) {
         const v = it.next();
@@ -503,14 +553,27 @@ function* execStmt(node, scope, frame) {
     case 'Import': {
       for (const { name, asname } of node.names) {
         const mod = importModule(name, frame);
-        storeName(scope, asname || name.split('.')[0], mod);
+        // `import a.b` binds the top package `a`; `import a.b as c` binds the leaf.
+        storeName(scope, asname || name.split('.')[0], asname ? mod : importModule(name.split('.')[0], frame));
       }
       return;
     }
 
     case 'ImportFrom': {
       if (node.level > 0) {
-        raiseError('ImportError', 'relative imports are not supported');
+        // Relative imports require a parent package; top-level scripts have none.
+        const pkg = frame.scope.moduleScope.vars.get('__package__');
+        if (!pkg || unwrap(pkg) === '') {
+          raiseError('ImportError', 'attempted relative import with no known parent package');
+        }
+        const base = unwrap(pkg).split('.').slice(0, node.level > 1 ? -(node.level - 1) : undefined).join('.');
+        const full = node.module ? (base ? base + '.' + node.module : node.module) : base;
+        const mod2 = importModule(full, frame);
+        for (const { name, asname } of node.names) {
+          if (!mod2.attrs.has(name)) raiseError('ImportError', `cannot import name '${name}'`);
+          storeName(scope, asname || name, mod2.attrs.get(name));
+        }
+        return;
       }
       const mod = importModule(node.module, frame);
       if (node.names === '*') {
@@ -531,6 +594,132 @@ function* execStmt(node, scope, frame) {
     default:
       throw new Error(`internal: unknown statement type ${node.type}`);
   }
+}
+
+// ---------- async / await (synchronous coroutine model) ----------
+
+function* awaitValue(v) {
+  if (v instanceof PyCoroutine) {
+    if (v.done) raiseError('RuntimeError', 'cannot reuse already awaited coroutine');
+    v.done = true;
+    if (v.nativeResult !== undefined) return v.nativeResult;
+    return yield* callFunction(v.fnObj, v.args, v.kwargs, true);
+  }
+  if (v instanceof PyInstance) {
+    const awHit = mroLookup(v.cls, '__await__');
+    if (awHit && !awHit.owner.builtin) {
+      const it = pyCall(bindClassAttr(awHit.value, v), []);
+      // Drive the iterator; its StopIteration value is the await result.
+      const iter = pyIter(it);
+      let last = NONE;
+      for (;;) { const x = iter.next(); if (x === DONE) break; last = x; }
+      return last;
+    }
+  }
+  raiseError('TypeError', `object ${typeOf(v).name} can't be used in 'await' expression`);
+}
+
+// ---------- structural pattern matching (match/case) ----------
+
+const SELF_MATCH_TYPES = [TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_BOOL, TYPE_BYTES,
+  TYPE_BYTEARRAY, TYPE_LIST, TYPE_TUPLE, TYPE_DICT, TYPE_SET, TYPE_FROZENSET];
+
+function* matchPattern(p, value, scope, frame) {
+  switch (p.ptype) {
+    case 'wildcard': return true;
+    case 'capture': storeName(scope, p.name, value); return true;
+    case 'value': return pyEq(value, yield* evalExpr(p.expr, scope, frame));
+    case 'as':
+      if (!(yield* matchPattern(p.pattern, value, scope, frame))) return false;
+      storeName(scope, p.name, value);
+      return true;
+    case 'or':
+      for (const sub of p.patterns) {
+        if (yield* matchPattern(sub, value, scope, frame)) return true;
+      }
+      return false;
+    case 'sequence': return yield* matchSequence(p, value, scope, frame);
+    case 'mapping': return yield* matchMapping(p, value, scope, frame);
+    case 'class': return yield* matchClass(p, value, scope, frame);
+    default: return false;
+  }
+}
+
+function* matchSequence(p, value, scope, frame) {
+  const u = unwrap(value);
+  let items;
+  if (u instanceof PyList || u instanceof PyTuple) items = u.items;
+  else if (u instanceof PyRange) items = iterToArray(value);
+  else return false;
+  const pats = p.patterns;
+  const starIdx = pats.findIndex((x) => x.ptype === 'star');
+  if (starIdx === -1) {
+    if (items.length !== pats.length) return false;
+    for (let i = 0; i < pats.length; i++) {
+      if (!(yield* matchPattern(pats[i], items[i], scope, frame))) return false;
+    }
+    return true;
+  }
+  const before = starIdx, after = pats.length - starIdx - 1;
+  if (items.length < before + after) return false;
+  for (let i = 0; i < before; i++) {
+    if (!(yield* matchPattern(pats[i], items[i], scope, frame))) return false;
+  }
+  for (let i = 0; i < after; i++) {
+    if (!(yield* matchPattern(pats[starIdx + 1 + i], items[items.length - after + i], scope, frame))) return false;
+  }
+  const starPat = pats[starIdx];
+  if (starPat.name) storeName(scope, starPat.name, new PyList(items.slice(before, items.length - after)));
+  return true;
+}
+
+function* matchMapping(p, value, scope, frame) {
+  const u = unwrap(value);
+  if (!(u instanceof PyDict)) return false;
+  const used = [];
+  for (let i = 0; i < p.keys.length; i++) {
+    const k = yield* evalExpr(p.keys[i], scope, frame);
+    const e = u.getEntry(k);
+    if (!e) return false;
+    used.push(k);
+    if (!(yield* matchPattern(p.patterns[i], e.value, scope, frame))) return false;
+  }
+  if (p.rest) {
+    const rest = new PyDict();
+    for (const [k, v] of u.entries()) if (!used.some((uk) => pyEq(uk, k))) rest.set(k, v);
+    storeName(scope, p.rest, rest);
+  }
+  return true;
+}
+
+function* matchClass(p, value, scope, frame) {
+  const cls = yield* evalExpr(p.cls, scope, frame);
+  if (!(cls instanceof PyType)) raiseError('TypeError', 'called match pattern must be a type');
+  if (!isInstanceOf(value, cls)) return false;
+  if (p.posPatterns.length) {
+    let matchArgs = null;
+    try { matchArgs = getAttr(cls, '__match_args__'); } catch (e) { /* none */ }
+    const argNames = matchArgs && matchArgs.items ? matchArgs.items.map(unwrap) : [];
+    if (SELF_MATCH_TYPES.includes(cls) && argNames.length === 0) {
+      if (p.posPatterns.length !== 1) {
+        raiseError('TypeError', `${cls.name}() accepts 1 positional sub-pattern (${p.posPatterns.length} given)`);
+      }
+      if (!(yield* matchPattern(p.posPatterns[0], value, scope, frame))) return false;
+    } else {
+      for (let i = 0; i < p.posPatterns.length; i++) {
+        if (i >= argNames.length) raiseError('TypeError', `${cls.name}() accepts ${argNames.length} positional sub-patterns`);
+        const av = getAttr(value, argNames[i]);
+        if (!(yield* matchPattern(p.posPatterns[i], av, scope, frame))) return false;
+      }
+    }
+  }
+  for (let i = 0; i < p.kwNames.length; i++) {
+    let av;
+    try { av = getAttr(value, p.kwNames[i]); }
+    catch (e) { if (e instanceof PyError && isInstanceOf(e.pyExc, EXC.AttributeError)) return false; throw e; }
+    if (!(yield* matchPattern(p.kwPatterns[i], av, scope, frame))) return false;
+  }
+  return true;
 }
 
 const INPLACE_DUNDER = {
@@ -721,18 +910,25 @@ function* execWith(node, itemIdx, scope, frame) {
   }
   const item = node.items[itemIdx];
   const mgr = yield* evalExpr(item.ctx, scope, frame);
+  const isAsync = !!node.isAsync;
+  const enterName = isAsync ? '__aenter__' : '__enter__';
+  const exitName = isAsync ? '__aexit__' : '__exit__';
   let enter, exit;
   try {
-    enter = getAttr(mgr, '__enter__');
-    exit = getAttr(mgr, '__exit__');
+    enter = getAttr(mgr, enterName);
+    exit = getAttr(mgr, exitName);
   } catch (e) {
     if (e instanceof PyError && isInstanceOf(e.pyExc, EXC.AttributeError)) {
       raiseError('TypeError',
-        `'${typeOf(mgr).name}' object does not support the context manager protocol`);
+        `'${typeOf(mgr).name}' object does not support the ${isAsync ? 'asynchronous ' : ''}context manager protocol`);
     }
     throw e;
   }
-  const entered = yield* callValue(enter, [], null);
+  const callMgr = function* (fn, a) {
+    const r = yield* callValue(fn, a, null);
+    return isAsync ? yield* awaitValue(r) : r;
+  };
+  const entered = yield* callMgr(enter, []);
   if (item.optionalVars) {
     yield* assignTarget(item.optionalVars, entered, scope, frame);
   }
@@ -741,14 +937,14 @@ function* execWith(node, itemIdx, scope, frame) {
     sig = yield* execWith(node, itemIdx + 1, scope, frame);
   } catch (e) {
     if (e instanceof PyError) {
-      const suppress = yield* callValue(exit, [typeOf(e.pyExc), e.pyExc, NONE], null);
+      const suppress = yield* callMgr(exit, [typeOf(e.pyExc), e.pyExc, NONE]);
       if (pyTruthy(suppress)) return undefined;
     } else {
-      yield* callValue(exit, [NONE, NONE, NONE], null);
+      yield* callMgr(exit, [NONE, NONE, NONE]);
     }
     throw e;
   }
-  yield* callValue(exit, [NONE, NONE, NONE], null);
+  yield* callMgr(exit, [NONE, NONE, NONE]);
   return sig;
 }
 
@@ -768,6 +964,7 @@ function* makeFunction(node, scope, frame, isLambda) {
     node.scopeInfo.isGenerator,
   );
   fnObj.isExprBody = isLambda;
+  fnObj.isAsync = !!node.isAsync;
   fnObj.filename = frame.file;
   fnObj.line = node.line;
   fnObj.defaults = new Map();
@@ -793,11 +990,20 @@ function* execClassDef(node, scope, frame) {
     }
     bases.push(bv);
   }
-  // class keywords (e.g. metaclass=...) are accepted and ignored
+  // class keywords: `metaclass=` selects the metaclass; the rest are forwarded
+  // to __init_subclass__.
+  const classKwargs = new Map();
+  let metaclass = null;
   for (const k of node.keywords || []) {
-    yield* evalExpr(k.value, scope, frame);
+    const v = yield* evalExpr(k.value, scope, frame);
+    if (k.name === 'metaclass') metaclass = v;
+    else if (k.name) classKwargs.set(k.name, v);
   }
   const effectiveBases = bases.length ? bases : [TYPE_OBJECT];
+  // A metaclass may also be inherited from a base.
+  if (!metaclass) {
+    for (const b of effectiveBases) { if (b.metatype) { metaclass = b.metatype; break; } }
+  }
 
   const classScope = new Scope(scope, {
     locals: node.scopeInfo.locals,
@@ -810,8 +1016,20 @@ function* execClassDef(node, scope, frame) {
   yield* execBlock(node.body, classScope, frame);
 
   const attrs = new Map(classScope.vars);
-  const cls = new PyType(node.name, effectiveBases, attrs, { module: frame.moduleName || '__main__' });
-  for (const v of attrs.values()) {
+  // Docstring (added to the namespace before the metaclass sees it).
+  if (node.body.length && node.body[0].type === 'ExprStmt' && node.body[0].value.type === 'Str') {
+    attrs.set('__doc__', node.body[0].value.value);
+  }
+  let cls;
+  if (metaclass && metaclass !== TYPE_TYPE) {
+    const ns = new PyDict();
+    for (const [k, v] of attrs) ns.set(k, v);
+    cls = yield* callValue(metaclass, [node.name, new PyTuple(effectiveBases), ns], null);
+    if (!(cls instanceof PyType)) { storeName(scope, node.name, cls); return; }
+  } else {
+    cls = new PyType(node.name, effectiveBases, attrs, { module: frame.moduleName || '__main__' });
+  }
+  for (const v of cls.attrs.values()) {
     if (v instanceof PyFunction && !v.definingClass) v.definingClass = cls;
     if (v instanceof PyClassMethod && v.func instanceof PyFunction && !v.func.definingClass) {
       v.func.definingClass = cls;
@@ -825,9 +1043,38 @@ function* execClassDef(node, scope, frame) {
       }
     }
   }
-  // Docstring
-  if (node.body.length && node.body[0].type === 'ExprStmt' && node.body[0].value.type === 'Str') {
-    attrs.set('__doc__', node.body[0].value.value);
+  // __slots__: record the allowed attribute names for enforcement in setAttr.
+  if (cls.attrs.has('__slots__')) {
+    const sv = cls.attrs.get('__slots__');
+    const u = unwrap(sv);
+    const names = typeof u === 'string' ? [u] : iterToArray(sv).map((x) => unwrap(x));
+    cls._slots = new Set(names);
+  }
+
+  // Descriptor protocol: call __set_name__(owner, name) on namespace members.
+  for (const [attrName, v] of cls.attrs) {
+    if (v instanceof PyInstance) {
+      const sn = mroLookup(v.cls, '__set_name__');
+      if (sn && !sn.owner.builtin) {
+        yield* callValue(bindClassAttr(sn.value, v), [cls, attrName], null);
+      }
+    }
+  }
+
+  // __init_subclass__: implicit classmethod on the nearest base, called with the
+  // new class plus any class keywords.
+  let iscHit = null;
+  for (let i = 1; i < cls.mro.length; i++) {
+    const t = cls.mro[i];
+    if (t.attrs && t.attrs.has('__init_subclass__')) {
+      iscHit = { value: t.attrs.get('__init_subclass__'), owner: t };
+      break;
+    }
+  }
+  if (iscHit && !iscHit.owner.builtin) {
+    let fn = iscHit.value;
+    if (fn instanceof PyClassMethod) fn = fn.func;
+    yield* callValue(fn, [cls], classKwargs.size ? classKwargs : null);
   }
 
   let value = cls;
@@ -923,13 +1170,24 @@ function* evalSubscriptIndex(index, scope, frame) {
 
 function* evalExpr(node, scope, frame) {
   switch (node.type) {
-    case 'Num': return node.value;
+    case 'Num': return node.imaginary ? new PyComplex(0, node.value) : node.value;
+
+    case 'Await': {
+      const v = yield* evalExpr(node.value, scope, frame);
+      return yield* awaitValue(v);
+    }
     case 'Str': return node.value;
     case 'Const': return node.value === null ? NONE : node.value;
     case 'Ellipsis': return PY_ELLIPSIS;
-    case 'Bytes':
-      raiseError('NotImplementedError', 'bytes literals are not supported in this implementation');
-      return;
+    case 'Bytes': {
+      const arr = [];
+      for (const ch of node.value) {
+        const c = ch.codePointAt(0);
+        if (c > 0xff) raiseError('SyntaxError', 'bytes can only contain ASCII literal characters');
+        arr.push(c);
+      }
+      return new PyBytes(arr, false);
+    }
 
     case 'Name': return loadName(scope, node.id);
 
@@ -1317,6 +1575,14 @@ export function importModule(name, frame) {
   if (STDLIB.has(name)) {
     const mod = STDLIB.get(name)(ENV);
     sysModules.set(name, mod);
+    // Link a dotted submodule as an attribute of its parent package.
+    if (name.includes('.')) {
+      const idx = name.lastIndexOf('.');
+      try {
+        const parent = importModule(name.slice(0, idx), frame);
+        parent.attrs.set(name.slice(idx + 1), mod);
+      } catch (e) { /* parent not a package */ }
+    }
     return mod;
   }
   // File-based import from the script directory.
@@ -1466,6 +1732,121 @@ BUILTINS.set('locals', new PyBuiltin('locals', () => {
 BUILTINS.set('__import__', new PyBuiltin('__import__', (args) => {
   return importModule(unwrap(args[0]), topFrame());
 }));
+
+// ---------- eval / exec / compile ----------
+
+const TYPE_CODE = new PyType('code', [TYPE_OBJECT], new Map(), { builtin: true });
+
+function parseForExec(source, mode) {
+  try {
+    if (mode === 'eval') {
+      const mod = parse(source, '<string>');
+      const body = mod.body.filter((s) => s.type !== 'Pass');
+      if (body.length !== 1 || body[0].type !== 'ExprStmt') {
+        raiseError('SyntaxError', 'eval() argument must be an expression');
+      }
+      return { ast: body[0].value, mode };
+    }
+    return { ast: parse(source, '<string>'), mode: 'exec' };
+  } catch (e) {
+    if (e instanceof PySyntaxError) raiseError('SyntaxError', e.message);
+    throw e;
+  }
+}
+
+// Build a scope seeded from the given globals/locals dicts (or the caller's
+// scope when both are omitted), run the code, then reflect bindings back.
+function runCode(code, globalsArg, localsArg, isEval) {
+  const caller = topFrame();
+  const hasNs = (globalsArg !== undefined && globalsArg !== NONE)
+    || (localsArg !== undefined && localsArg !== NONE);
+  let scope, writeback = null;
+  if (!hasNs) {
+    scope = caller ? caller.scope : makeModuleScope();
+  } else {
+    scope = new Scope(null, {
+      locals: null, globals: new Set(), nonlocals: new Set(), isClass: false, isComprehension: false,
+    }, null);
+    scope.moduleScope = scope;
+    const g = globalsArg !== undefined && globalsArg !== NONE ? unwrap(globalsArg) : null;
+    const l = localsArg !== undefined && localsArg !== NONE ? unwrap(localsArg) : null;
+    if (g instanceof PyDict) for (const [k, v] of g.entries()) scope.vars.set(k, v);
+    if (l instanceof PyDict && l !== g) for (const [k, v] of l.entries()) scope.vars.set(k, v);
+    if (!scope.vars.has('__name__')) scope.vars.set('__name__', '__main__');
+    writeback = l instanceof PyDict ? l : (g instanceof PyDict ? g : null);
+  }
+  const frame = {
+    name: isEval ? '<eval>' : '<exec>', file: '<string>', line: 1,
+    scope, fnObj: null, excStack: [], moduleName: scope.vars.get('__name__') || '__main__',
+  };
+  FRAMES.push(frame);
+  try {
+    if (isEval) return runGen(evalExpr(code.ast, scope, frame));
+    for (const stmt of code.ast.body) {
+      frame.line = stmt.line || 1;
+      runGen(execStmt(stmt, scope, frame));
+    }
+    if (writeback) for (const [k, v] of scope.vars) writeback.set(k, v);
+    return NONE;
+  } finally {
+    FRAMES.pop();
+  }
+}
+
+function asCode(arg, mode) {
+  if (arg instanceof PyInstance && arg.cls === TYPE_CODE) return arg._code;
+  const s = unwrap(arg);
+  if (typeof s !== 'string') {
+    raiseError('TypeError', `${mode === 'eval' ? 'eval' : 'exec'}() arg 1 must be a string, bytes or code object`);
+  }
+  return parseForExec(s, mode);
+}
+
+BUILTINS.set('eval', new PyBuiltin('eval', (args) => {
+  const code = asCode(args[0], 'eval');
+  return runCode(code, args[1], args[2], true);
+}));
+BUILTINS.set('exec', new PyBuiltin('exec', (args) => {
+  const code = asCode(args[0], 'exec');
+  return runCode(code, args[1], args[2], false);
+}));
+BUILTINS.set('compile', new PyBuiltin('compile', (args) => {
+  const source = unwrap(args[0]);
+  const mode = args.length > 2 ? unwrap(args[2]) : 'exec';
+  if (mode !== 'eval' && mode !== 'exec' && mode !== 'single') {
+    raiseError('ValueError', "compile() mode must be 'exec', 'eval' or 'single'");
+  }
+  const inst = new PyInstance(TYPE_CODE);
+  inst._code = parseForExec(source, mode === 'single' ? 'exec' : mode);
+  return inst;
+}));
+
+// ---------- asyncio (synchronous coroutine driver) ----------
+
+STDLIB.set('asyncio', () => {
+  const mod = new PyModule('asyncio');
+  const drive = (coro) => {
+    if (coro instanceof PyCoroutine) return runGen(awaitValue(coro));
+    return coro;
+  };
+  mod.attrs.set('run', new PyBuiltin('run', (args) => drive(args[0])));
+  mod.attrs.set('sleep', new PyBuiltin('sleep', (args) => {
+    const c = new PyCoroutine(null, null, null);
+    c.nativeResult = args.length > 1 ? args[1] : NONE;
+    return c;
+  }));
+  mod.attrs.set('gather', new PyBuiltin('gather', (args) => {
+    // Run the awaitables sequentially and collect results into a coroutine.
+    const c = new PyCoroutine(null, null, null);
+    const results = args.map((a) => drive(a));
+    c.nativeResult = new PyList(results);
+    return c;
+  }));
+  mod.attrs.set('iscoroutine', new PyBuiltin('iscoroutine', (args) => args[0] instanceof PyCoroutine));
+  mod.attrs.set('iscoroutinefunction', new PyBuiltin('iscoroutinefunction', (args) => args[0] instanceof PyFunction && !!args[0].isAsync));
+  mod.attrs.set('ensure_future', new PyBuiltin('ensure_future', (args) => args[0]));
+  return mod;
+});
 
 // Install the synchronous call hook used by JS-level protocol code.
 setCallHook(pyCallSync);
