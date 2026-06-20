@@ -9,10 +9,21 @@ $ ./v8python fib.py
 $ ./v8python          # 対話 REPL
 ```
 
+## インストール
+
+```bash
+# npm からグローバルインストール
+npm install -g v8python
+v8python script.py
+
+# あるいは npx で都度実行
+npx v8python script.py
+```
+
 ## 使い方
 
 ```bash
-# スクリプトを実行
+# スクリプトを実行（リポジトリを clone した場合）
 ./v8python script.py [引数...]
 
 # 対話モード（REPL）

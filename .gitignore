@@ -1,2 +1,6 @@
 # Claude Code のローカル設定（個人環境固有）
 .claude/
+
+# npm
+node_modules/
+*.tgz
