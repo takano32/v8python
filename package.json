@@ -1,0 +1,39 @@
+{
+  "name": "v8python",
+  "version": "0.1.0",
+  "description": "Python 3 interpreter implemented in pure JavaScript, running on V8 (Node.js). Zero dependencies.",
+  "type": "module",
+  "bin": {
+    "v8python": "./v8python"
+  },
+  "files": [
+    "src/",
+    "v8python",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node tests/run_tests.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/takano32/v8python.git"
+  },
+  "bugs": {
+    "url": "https://github.com/takano32/v8python/issues"
+  },
+  "homepage": "https://github.com/takano32/v8python#readme",
+  "keywords": [
+    "python",
+    "python3",
+    "interpreter",
+    "v8",
+    "language",
+    "repl"
+  ],
+  "author": "TAKANO Mitsuhiro",
+  "license": "MIT"
+}
