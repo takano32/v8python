@@ -1420,7 +1420,7 @@ export function iterToArray(v, what = 'iterable') {
   }
 }
 
-// Installed by the CLI layer; see python.js.
+// Installed by the CLI layer; see cli.js.
 export const FileOps = { readLine: null, write: null, read: null, close: null };
 
 function fileReadLineOrDone(f) {

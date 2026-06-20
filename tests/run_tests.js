@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Differential test runner: runs each tests/cases/*.py under both CPython
-// (python3) and v8python (node python.js), then compares outputs.
+// (python3) and v8python (node src/cli.js), then compares outputs.
 //
 // Pass/fail rules:
 //   - stdout must match exactly, AND
@@ -90,7 +90,7 @@ function main() {
   for (const f of files) {
     const file = path.join(CASES_DIR, f);
     const cp = run('python3', [], file);
-    const v8 = run('node', ['python.js'], file);
+    const v8 = run('node', ['src/cli.js'], file);
 
     let ok = cp.stdout === v8.stdout;
     let reason = '';

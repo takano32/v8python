@@ -1,5 +1,5 @@
 // Interactive REPL for v8python.
-// Driven synchronously off IO.readLine (wired up by python.js).
+// Driven synchronously off IO.readLine (wired up by cli.js).
 
 import { IO } from './builtins.js';
 import { makeModuleScope, runInScope, PySyntaxError } from './interp.js';

@@ -5,18 +5,18 @@ Python インタプリタです。字句解析 → 再帰下降パーサ → JS 
 ツリーウォーク評価器、という構成になっています。
 
 ```
-$ node python.js fib.py
-$ node python.js          # 対話 REPL
+$ ./v8python fib.py
+$ ./v8python          # 対話 REPL
 ```
 
 ## 使い方
 
 ```bash
 # スクリプトを実行
-node python.js script.py [引数...]
+./v8python script.py [引数...]
 
 # 対話モード（REPL）
-node python.js
+./v8python
 
 # CPython との差分テスト（python3 が必要）
 node tests/run_tests.js          # 全件
@@ -65,7 +65,8 @@ src/interp.js    ツリーウォーク評価器。yield を実現するため、
                  JS ジェネレータ関数として書いている。
 src/stdlib.js    標準ライブラリモジュール群。
 src/repl.js      対話 REPL（複数行ブロック入力・式結果の repr 表示）。
-python.js        CLI エントリ。ファイル実行・traceback 整形・stdin/stdout/fs 接続。
+src/cli.js       CLI エントリ。ファイル実行・traceback 整形・stdin/stdout/fs 接続。
+v8python         実行ランチャ（bash）。src/cli.js を node で起動するだけのラッパ。
 ```
 
 ## 設計上の面白い点
