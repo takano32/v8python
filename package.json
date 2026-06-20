@@ -1,6 +1,6 @@
 {
   "name": "v8python",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Python 3 interpreter implemented in pure JavaScript, running on V8 (Node.js). Zero dependencies.",
   "type": "module",
   "bin": {
