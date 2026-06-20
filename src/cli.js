@@ -1,18 +1,18 @@
 #!/usr/bin/env node
-// v8python CLI entry point.
-//   node python.js script.py [args...]   run a file
-//   node python.js                       interactive REPL (see repl.js)
+// v8python CLI entry point (invoke via the ./v8python launcher).
+//   ./v8python script.py [args...]   run a file
+//   ./v8python                       interactive REPL (see repl.js)
 
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
-import { runModule, FileSys, ENV, PySyntaxError } from './src/interp.js';
-import { IO } from './src/builtins.js';
+import { runModule, FileSys, ENV, PySyntaxError } from './interp.js';
+import { IO } from './builtins.js';
 import {
   PyError, pyStr, typeOf, isInstanceOf, EXC, NONE,
   unwrap, FileOps, PyFile, raiseError,
-} from './src/objects.js';
+} from './objects.js';
 
 // ---------- I/O wiring ----------
 
@@ -160,7 +160,7 @@ function main() {
 
   if (args.length === 0) {
     // Defer to REPL module if present; otherwise inform the user.
-    import('./src/repl.js').then((repl) => {
+    import('./repl.js').then((repl) => {
       repl.startRepl({ printTraceback });
     }).catch((e) => {
       process.stderr.write('REPL is not available: ' + e.message + '\n');
@@ -176,7 +176,7 @@ function main() {
   try {
     src = fs.readFileSync(scriptPath, 'utf8');
   } catch (e) {
-    process.stderr.write(`python.js: can't open file '${scriptPath}': ${e.message}\n`);
+    process.stderr.write(`v8python: can't open file '${scriptPath}': ${e.message}\n`);
     process.exitCode = 2;
     return;
   }

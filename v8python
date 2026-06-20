@@ -1,0 +1,13 @@
+#!/usr/bin/env node
+// v8python launcher. Delegates to the real CLI in src/cli.js.
+//   ./v8python script.py [args...]   run a file
+//   ./v8python                       interactive REPL
+//
+// This file deliberately uses only a dynamic import() (no static import/export
+// syntax) so Node treats it as CommonJS on every supported version (18+),
+// avoiding extensionless-ESM detection differences. The relative specifier
+// resolves against this file's own location, so it works from any cwd.
+import('./src/cli.js').catch((e) => {
+  process.stderr.write('v8python: failed to start: ' + (e && e.stack || e) + '\n');
+  process.exit(1);
+});
